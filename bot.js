@@ -294,72 +294,77 @@ bot.on('message', async (msg) => {
   const safePrompt = text.replace(/"/g, '\\"');
   const startTime = Date.now();
 
-  // Use --resume if initialized, otherwise use --session-id to initialize the session.
-  // Redirect stdin from /dev/null (< /dev/null) to skip the 3-second stdin wait warning.
-  const sessionFlag = currentSession.initialized
-    ? `--resume "${currentSession.id}"`
-    : `--session-id "${currentSession.id}"`;
-
-  const command = `"${claudeBin}" ${sessionFlag} -p "${safePrompt}" < /dev/null`;
-
   log('INFO', `Executing Claude Code command in session: ${currentSession.title} (${currentSession.id})`, {
     initialized: !!currentSession.initialized,
     prompt: text,
     cwd: PROJECT_CWD
   });
 
-  exec(command, {
-    cwd: PROJECT_CWD,
-    env: process.env,
-    maxBuffer: 1024 * 1024 * 10 // 10MB buffer
-  }, async (error, stdout, stderr) => {
-    const combinedOutput = ((stderr || '') + (stdout || '') + (error?.message || '')).trim();
+  // Self-healing execution handler that handles --resume vs --session-id automatically
+  function executeCommand(flag, sessionId, retryCount = 0) {
+    const command = `"${claudeBin}" ${flag} "${sessionId}" -p "${safePrompt}" < /dev/null`;
 
-    // Auto-recovery: If --resume failed because the session was not found on disk, fallback to --session-id
-    if (error && currentSession.initialized && combinedOutput.includes('No conversation found with session ID')) {
-      log('WARN', `Session ${currentSession.id} not found by --resume, auto-recovering with --session-id...`);
-      currentSession.initialized = false;
-      const fallbackCommand = `"${claudeBin}" --session-id "${currentSession.id}" -p "${safePrompt}" < /dev/null`;
+    exec(command, {
+      cwd: PROJECT_CWD,
+      env: process.env,
+      maxBuffer: 1024 * 1024 * 10 // 10MB buffer
+    }, async (error, stdout, stderr) => {
+      const combined = ((stderr || '') + ' ' + (stdout || '') + ' ' + (error ? error.message : '')).trim();
 
-      return exec(fallbackCommand, {
-        cwd: PROJECT_CWD,
-        env: process.env,
-        maxBuffer: 1024 * 1024 * 10
-      }, async (fbErr, fbStdout, fbStderr) => {
-        const elapsed = Date.now() - startTime;
-        const fbOutput = (fbStdout || fbStderr || fbErr?.message || 'Task completed with no output.').trim();
+      // Case 1: Not logged in
+      if (combined.includes('Not logged in') || combined.includes('Please run /login')) {
+        log('ERROR', 'Claude is not authenticated', { combined });
+        return sendSafeMessage(chatId, 
+          '⚠️ *Authentication Required*\n\n' +
+          'Claude Code is not logged in.\n\n' +
+          '• If using API: add `ANTHROPIC_API_KEY=sk-ant-...` to your `.env`\n' +
+          '• If using Claude Pro/Team: run `claude auth login` on the server or copy `~/.claude` config.',
+          { parse_mode: 'Markdown' }
+        );
+      }
 
-        if (!fbErr) {
-          currentSession.initialized = true;
-          saveSessions(data);
-          log('INFO', `Claude Code auto-recovery succeeded in ${elapsed}ms`, { outputLength: fbOutput.length });
-        } else {
-          log('ERROR', `Claude Code auto-recovery failed after ${elapsed}ms`, { error: fbErr.message });
-        }
+      // Case 2: Session ID already in use -> Switch to --resume
+      if (error && combined.includes('already in use') && retryCount === 0) {
+        log('WARN', `Session ${sessionId} already in use, auto-recovering with --resume...`);
+        currentSession.initialized = true;
+        saveSessions(data);
+        return executeCommand('--resume', sessionId, retryCount + 1);
+      }
 
-        await sendLongOutput(chatId, fbOutput);
-      });
-    }
+      // Case 3: No conversation found with session ID -> Generate fresh ID and use --session-id
+      if (error && combined.includes('No conversation found') && retryCount === 0) {
+        const freshId = crypto.randomUUID();
+        log('WARN', `Session ${sessionId} has no prior conversation on disk, recovering with fresh ID: ${freshId}...`);
+        currentSession.id = freshId;
+        currentSession.initialized = false;
+        saveSessions(data);
+        return executeCommand('--session-id', freshId, retryCount + 1);
+      }
 
-    const elapsed = Date.now() - startTime;
-    const output = (stdout || stderr || error?.message || 'Task completed with no output.').trim();
+      const elapsed = Date.now() - startTime;
+      const output = (stdout || stderr || error?.message || 'Task completed with no output.').trim();
 
-    if (error) {
-      log('ERROR', `Claude Code execution failed after ${elapsed}ms`, {
-        error: error.message,
-        stderr: stderr?.trim()
-      });
-    } else {
-      // Mark session as initialized once successfully run
-      currentSession.initialized = true;
-      saveSessions(data);
-      log('INFO', `Claude Code execution succeeded in ${elapsed}ms`, {
-        outputLength: output.length
-      });
-    }
+      if (error) {
+        log('ERROR', `Claude Code execution failed after ${elapsed}ms`, {
+          error: error.message,
+          stdout: stdout?.trim(),
+          stderr: stderr?.trim()
+        });
+      } else {
+        currentSession.initialized = true;
+        saveSessions(data);
+        log('INFO', `Claude Code execution succeeded in ${elapsed}ms`, {
+          outputLength: output.length
+        });
+      }
 
-    await sendLongOutput(chatId, output);
-  });
+      await sendLongOutput(chatId, output);
+    });
+  }
+
+  // Initial flag choice: --resume if initialized, otherwise --session-id
+  const initialFlag = currentSession.initialized ? '--resume' : '--session-id';
+  executeCommand(initialFlag, currentSession.id);
 });
 
 log('INFO', 'Claude Code Telegram controller is now listening.');
