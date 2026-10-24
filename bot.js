@@ -152,7 +152,6 @@ async function sendFormattedOutput(chatId, rawMarkdown) {
     return await sendSafeMessage(chatId, html, { parse_mode: 'HTML' });
   }
 
-  // Split safely by lines to avoid truncating in the middle of an HTML tag
   const lines = html.split('\n');
   let currentChunk = '';
 
@@ -176,6 +175,7 @@ function loadSessions() {
     try {
       const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
       if (data && Array.isArray(data.list) && data.activeId) {
+        if (!data.permissionMode) data.permissionMode = 'acceptEdits';
         return data;
       }
     } catch (e) {
@@ -186,6 +186,7 @@ function loadSessions() {
   const defaultId = crypto.randomUUID();
   const initialData = {
     activeId: defaultId,
+    permissionMode: 'acceptEdits', // 'acceptEdits', 'bypass', or 'plan'
     list: [{
       id: defaultId,
       title: 'Default Session',
@@ -209,7 +210,7 @@ function getActiveSession(data) {
   return data.list.find(s => s.id === data.activeId) || data.list[0];
 }
 
-// --- Render Interactive Menu ---
+// --- Render Interactive Sessions Menu ---
 function renderSessionsMenu(chatId, messageId = null) {
   const data = loadSessions();
   const buttons = [];
@@ -229,6 +230,43 @@ function renderSessionsMenu(chatId, messageId = null) {
   });
 
   buttons.push([{ text: '➕ Create New Session', callback_data: 'create_new' }]);
+
+  const options = {
+    parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: buttons }
+  };
+
+  if (messageId) {
+    bot.editMessageText(text, { chat_id: chatId, message_id: messageId, ...options }).catch(() => {});
+  } else {
+    sendSafeMessage(chatId, text, options);
+  }
+}
+
+// --- Render Permission Mode Menu ---
+function renderModeMenu(chatId, messageId = null) {
+  const data = loadSessions();
+  const currentMode = data.permissionMode || 'acceptEdits';
+
+  const modes = [
+    { key: 'acceptEdits', label: '✍️ Auto-Accept Edits', desc: 'Can read, create & edit files without asking (Default).' },
+    { key: 'bypass', label: '🚀 Full Autonomous', desc: 'Can edit files + run terminal & bash commands.' },
+    { key: 'plan', label: '🛡️ Safe / Plan Only', desc: 'Read-only mode. Forbidden from modifying files.' }
+  ];
+
+  let text = '⚙️ *Permission Approval Settings*\n\n';
+  text += 'Choose how Claude Code handles tool and execution permissions on your server:\n\n';
+
+  const buttons = [];
+  modes.forEach((m) => {
+    const isSelected = currentMode === m.key;
+    text += `${isSelected ? '🟢' : '⚪'} *${m.label}* ${isSelected ? '_(Active)_' : ''}\n   └ ${m.desc}\n\n`;
+
+    buttons.push([{
+      text: `${isSelected ? '✓ ' : ''}${m.label}`,
+      callback_data: `set_mode_${m.key}`
+    }]);
+  });
 
   const options = {
     parse_mode: 'Markdown',
@@ -344,6 +382,19 @@ bot.on('callback_query', (query) => {
 
   const data = loadSessions();
 
+  // Mode change handler
+  if (action.startsWith('set_mode_')) {
+    const newMode = action.replace('set_mode_', '');
+    data.permissionMode = newMode;
+    saveSessions(data);
+
+    log('INFO', `Changed permission mode to ${newMode}`);
+    bot.answerCallbackQuery(query.id, { text: `Permission mode set to ${newMode}` });
+    renderModeMenu(chatId, messageId);
+    return;
+  }
+
+  // Session create
   if (action === 'create_new') {
     const newId = crypto.randomUUID();
     const newSession = {
@@ -364,6 +415,7 @@ bot.on('callback_query', (query) => {
     return;
   }
 
+  // Session switch
   if (action.startsWith('switch_')) {
     const targetId = action.replace('switch_', '');
     const target = data.list.find(s => s.id === targetId);
@@ -427,15 +479,21 @@ bot.on('message', async (msg) => {
     const helpMsg = 
       '🤖 *Claude Code cPanel Controller*\n\n' +
       '• *Send any text:* Prompt Claude Code on active session.\n' +
-      '• `/login` or `/reauth`: Sign in with your Claude Pro/Team subscription via link.\n' +
-      '• `/status`: Check authentication status.\n' +
-      '• `/setkey <key>`: Configure an Anthropic API Key directly.\n' +
+      '• `/mode`: Configure permission approval mode (Edits, Full Auto, Safe).\n' +
       '• `/sessions` or `/list`: View and switch sessions.\n' +
       '• `/new [name]`: Start a new named session.\n' +
+      '• `/login` or `/reauth`: Sign in with your Claude Pro/Team subscription.\n' +
+      '• `/status`: Check authentication status.\n' +
+      '• `/setkey <key>`: Configure an Anthropic API Key directly.\n' +
       '• `/logs [lines]`: Read recent debug log entries (default 30).\n' +
       '• `/cwd`: Show current working directory.\n' +
       '• `/help`: Display this guide.';
     return sendSafeMessage(chatId, helpMsg, { parse_mode: 'Markdown' });
+  }
+
+  // Permission mode switcher
+  if (text === '/mode' || text === '/permissions') {
+    return renderModeMenu(chatId);
   }
 
   // Login / Reauth command
@@ -526,6 +584,15 @@ bot.on('message', async (msg) => {
   // --- Process Claude Code Instruction ---
   const data = loadSessions();
   const currentSession = getActiveSession(data);
+  const currentMode = data.permissionMode || 'acceptEdits';
+
+  // Determine permission flag
+  let permissionFlag = '--permission-mode acceptEdits';
+  if (currentMode === 'bypass') {
+    permissionFlag = '--dangerously-skip-permissions';
+  } else if (currentMode === 'plan') {
+    permissionFlag = '--permission-mode plan';
+  }
 
   // Auto-name session from first prompt if newly created
   if (currentSession.isNew) {
@@ -534,12 +601,14 @@ bot.on('message', async (msg) => {
     saveSessions(data);
   }
 
-  await sendSafeMessage(chatId, `⏳ Running in *${currentSession.title}*...`, { parse_mode: 'Markdown' });
+  await sendSafeMessage(chatId, `⏳ Running in *${currentSession.title}* [${currentMode}]...`, { parse_mode: 'Markdown' });
 
   const safePrompt = text.replace(/"/g, '\\"');
   const startTime = Date.now();
 
   log('INFO', `Executing Claude Code command in session: ${currentSession.title} (${currentSession.id})`, {
+    permissionMode: currentMode,
+    permissionFlag,
     initialized: !!currentSession.initialized,
     prompt: text,
     cwd: PROJECT_CWD
@@ -547,7 +616,7 @@ bot.on('message', async (msg) => {
 
   // Self-healing execution handler that handles --resume vs --session-id automatically
   function executeCommand(flag, sessionId, retryCount = 0) {
-    const command = `"${claudeBin}" ${flag} "${sessionId}" -p "${safePrompt}" < /dev/null`;
+    const command = `"${claudeBin}" ${flag} "${sessionId}" ${permissionFlag} -p "${safePrompt}" < /dev/null`;
 
     exec(command, {
       cwd: PROJECT_CWD,
@@ -603,7 +672,6 @@ bot.on('message', async (msg) => {
         });
       }
 
-      // Send output rendered with rich Telegram formatting
       await sendFormattedOutput(chatId, output);
     });
   }
