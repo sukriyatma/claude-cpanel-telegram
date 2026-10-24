@@ -9,6 +9,27 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const ALLOWED_USER_ID = process.env.TELEGRAM_USER_ID;
 const PROJECT_CWD = process.env.PROJECT_CWD || __dirname;
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
+const LOG_FILE = path.join(__dirname, 'bot.log');
+
+// --- Structured File Logger ---
+function log(level, message, meta = null) {
+  const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  let entry = `[${timestamp}] [${level.toUpperCase()}] ${message}`;
+  if (meta) {
+    entry += ` | Details: ${typeof meta === 'object' ? JSON.stringify(meta) : meta}`;
+  }
+  entry += '\n';
+
+  // Output to standard console (cPanel passenger logs)
+  process.stdout.write(entry);
+
+  // Append to bot.log file for easy debugging
+  try {
+    fs.appendFileSync(LOG_FILE, entry, 'utf8');
+  } catch (err) {
+    console.error('Failed writing to bot.log:', err.message);
+  }
+}
 
 // Locate Claude binary
 const claudeBin = process.env.CLAUDE_BIN || (
@@ -18,23 +39,37 @@ const claudeBin = process.env.CLAUDE_BIN || (
 );
 
 if (!TELEGRAM_TOKEN) {
-  console.error('ERROR: TELEGRAM_TOKEN is missing in environment variables.');
+  log('FATAL', 'TELEGRAM_TOKEN is missing in environment variables.');
   process.exit(1);
 }
 
+log('INFO', 'Starting Claude Code Telegram controller...', {
+  nodeVersion: process.version,
+  pid: process.pid,
+  projectCwd: PROJECT_CWD,
+  claudeBin
+});
+
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+
+bot.on('polling_error', (error) => {
+  log('ERROR', 'Telegram polling error', error.message);
+});
 
 // --- Safe Messaging (Handles Telegram Markdown Parsing Errors) ---
 async function sendSafeMessage(chatId, text, options = {}) {
   try {
     return await bot.sendMessage(chatId, text, options);
   } catch (err) {
-    // If Markdown parsing fails, retry as plain text
+    log('WARN', 'Telegram send failed with formatting, retrying as plain text', err.message);
     if (options.parse_mode) {
       delete options.parse_mode;
-      return await bot.sendMessage(chatId, text, options);
+      try {
+        return await bot.sendMessage(chatId, text, options);
+      } catch (retryErr) {
+        log('ERROR', 'Telegram plain text send also failed', retryErr.message);
+      }
     }
-    console.error('Error sending Telegram message:', err.message);
   }
 }
 
@@ -53,7 +88,7 @@ function loadSessions() {
     try {
       return JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
     } catch (e) {
-      console.error('Error reading sessions.json, resetting to default.', e.message);
+      log('ERROR', 'Failed parsing sessions.json, reinitializing default session', e.message);
     }
   }
 
@@ -71,7 +106,11 @@ function loadSessions() {
 }
 
 function saveSessions(data) {
-  fs.writeFileSync(SESSIONS_FILE, JSON.stringify(data, null, 2), 'utf8');
+  try {
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(data, null, 2), 'utf8');
+  } catch (err) {
+    log('ERROR', 'Failed to save sessions.json', err.message);
+  }
 }
 
 function getActiveSession(data) {
@@ -119,6 +158,7 @@ bot.on('callback_query', (query) => {
 
   // Authorization check
   if (ALLOWED_USER_ID && query.from.id.toString() !== ALLOWED_USER_ID.toString()) {
+    log('WARN', 'Unauthorized callback query attempt', { from: query.from });
     return bot.answerCallbackQuery(query.id, { text: 'Unauthorized' });
   }
 
@@ -136,6 +176,7 @@ bot.on('callback_query', (query) => {
     data.activeId = newId;
     saveSessions(data);
 
+    log('INFO', 'New session created via button', { sessionId: newId, title: newSession.title });
     bot.answerCallbackQuery(query.id, { text: 'New session created!' });
     renderSessionsMenu(chatId, messageId);
     sendSafeMessage(chatId, `✨ Created & switched to *${newSession.title}*. Send your first instruction!`, { parse_mode: 'Markdown' });
@@ -149,6 +190,7 @@ bot.on('callback_query', (query) => {
     if (target) {
       data.activeId = target.id;
       saveSessions(data);
+      log('INFO', 'Switched active session', { sessionId: target.id, title: target.title });
       bot.answerCallbackQuery(query.id, { text: `Switched to ${target.title}` });
       renderSessionsMenu(chatId, messageId);
       sendSafeMessage(chatId, `Switched to: *${target.title}*`, { parse_mode: 'Markdown' });
@@ -163,10 +205,17 @@ bot.on('message', async (msg) => {
 
   // Authorization check
   if (ALLOWED_USER_ID && msg.from.id.toString() !== ALLOWED_USER_ID.toString()) {
+    log('WARN', 'Unauthorized access attempt blocked', {
+      fromId: msg.from.id,
+      username: msg.from.username,
+      text: text?.slice(0, 50)
+    });
     return sendSafeMessage(chatId, '⛔ Unauthorized access. Configure TELEGRAM_USER_ID.');
   }
 
   if (!text) return;
+
+  log('DEBUG', 'Received message', { from: msg.from.username || msg.from.id, text });
 
   // Commands
   if (text === '/start' || text === '/help') {
@@ -175,6 +224,7 @@ bot.on('message', async (msg) => {
       '• *Send any text:* Prompt Claude Code on active session.\n' +
       '• `/sessions` or `/list`: View and switch sessions.\n' +
       '• `/new [name]`: Start a new named session.\n' +
+      '• `/logs [lines]`: Read recent debug log entries (default 30).\n' +
       '• `/cwd`: Show current working directory.\n' +
       '• `/help`: Display this guide.';
     return sendSafeMessage(chatId, helpMsg, { parse_mode: 'Markdown' });
@@ -191,11 +241,33 @@ bot.on('message', async (msg) => {
     data.list.push({ id: newId, title: customTitle, createdAt: Date.now(), isNew: true });
     data.activeId = newId;
     saveSessions(data);
+    log('INFO', 'New session created via command', { sessionId: newId, title: customTitle });
     return sendSafeMessage(chatId, `✨ Started new session: *${customTitle}*. Type your task below!`, { parse_mode: 'Markdown' });
   }
 
   if (text === '/cwd') {
     return sendSafeMessage(chatId, `📁 Working Directory: \`${PROJECT_CWD}\``, { parse_mode: 'Markdown' });
+  }
+
+  // --- /logs command to view debug logs right in Telegram ---
+  if (text.startsWith('/logs')) {
+    const parts = text.split(' ');
+    const count = parseInt(parts[1], 10) || 30;
+
+    if (!fs.existsSync(LOG_FILE)) {
+      return sendSafeMessage(chatId, 'ℹ️ Log file (bot.log) does not exist yet.');
+    }
+
+    try {
+      const content = fs.readFileSync(LOG_FILE, 'utf8');
+      const lines = content.trim().split('\n');
+      const recent = lines.slice(-count).join('\n');
+      const reply = `📄 *Recent ${Math.min(count, lines.length)} log lines:*\n\`\`\`text\n${recent}\n\`\`\``;
+      return sendSafeMessage(chatId, reply, { parse_mode: 'Markdown' });
+    } catch (err) {
+      log('ERROR', 'Failed reading log file', err.message);
+      return sendSafeMessage(chatId, '❌ Error reading log file: ' + err.message);
+    }
   }
 
   // --- Process Claude Code Instruction ---
@@ -215,14 +287,33 @@ bot.on('message', async (msg) => {
   const safePrompt = text.replace(/"/g, '\\"');
   const command = `"${claudeBin}" --resume "${currentSession.id}" -p "${safePrompt}"`;
 
+  const startTime = Date.now();
+  log('INFO', `Executing Claude Code command in session: ${currentSession.title} (${currentSession.id})`, {
+    prompt: text,
+    cwd: PROJECT_CWD
+  });
+
   exec(command, {
     cwd: PROJECT_CWD,
     env: process.env,
     maxBuffer: 1024 * 1024 * 10 // 10MB buffer
   }, async (error, stdout, stderr) => {
+    const elapsed = Date.now() - startTime;
     const output = (stdout || stderr || error?.message || 'Task completed with no output.').trim();
+
+    if (error) {
+      log('ERROR', `Claude Code execution failed after ${elapsed}ms`, {
+        error: error.message,
+        stderr: stderr?.trim()
+      });
+    } else {
+      log('INFO', `Claude Code execution succeeded in ${elapsed}ms`, {
+        outputLength: output.length
+      });
+    }
+
     await sendLongOutput(chatId, output);
   });
 });
 
-console.log('Claude Code Telegram controller running...');
+log('INFO', 'Claude Code Telegram controller is now listening.');

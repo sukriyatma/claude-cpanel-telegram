@@ -1,6 +1,6 @@
 # Claude Code cPanel Controller (Telegram Bot)
 
-A lightweight bridge that enables you to run and control **Claude Code** on a cPanel web server (without SSH access) remotely from your phone using Telegram, featuring **interactive session switching** via Telegram Inline Keyboard buttons.
+A lightweight bridge that enables you to run and control **Claude Code** on a cPanel web server (without SSH access) remotely from your phone using Telegram, featuring **interactive session switching** and **persistent file logging for debugging**.
 
 ---
 
@@ -8,9 +8,11 @@ A lightweight bridge that enables you to run and control **Claude Code** on a cP
 
 - 📱 **Control Claude from Mobile:** Send instructions and receive code modifications directly within Telegram.
 - 🔄 **Interactive Session Switcher:** View past sessions and switch between them using clickable inline buttons (`/sessions`).
+- 📝 **Dedicated Debug Log File (`bot.log`):** Automatically logs all messages, unauthorized attempts, Claude execution commands, timestamps, and errors.
+- 🔍 **Live In-Chat Log Inspection:** Inspect debug logs directly on your phone using `/logs [count]`.
 - 🔑 **Claude Pro / Team Subscription Support:** Use your existing Claude subscription without paying for API tokens (by uploading `~/.claude.json`).
 - ⚡ **No SSH Required:** Works completely inside cPanel's **Setup Node.js App** (Passenger daemon).
-- 🔒 **Secure:** Restricted to your personal Telegram User ID so no unauthorized person can run commands on your server.
+- 🔒 **Secure:** Restricted to your personal Telegram User ID (`TELEGRAM_USER_ID`) so no unauthorized person can run commands on your server.
 - 💾 **Persistent:** Sessions and history survive server restarts (`sessions.json`).
 
 ---
@@ -20,17 +22,18 @@ A lightweight bridge that enables you to run and control **Claude Code** on a cP
 ```
  📱 Your Phone (Telegram)
        │
-       │ (1) Chat / Tap Session Buttons
+       │ (1) Chat / Tap Session Buttons / Check /logs
        ▼
  🌐 cPanel Server (Phusion Passenger / Node.js)
        │
        │ (2) Runs `bot.js` 24/7 in background
+       │ (3) Appends events & errors to `bot.log`
        ▼
  🤖 Claude Code Engine (`@anthropic-ai/claude-code`)
        │
-       │ (3) Loads subscription auth (~/.claude.json)
-       │ (4) Executes `--resume <id> -p "prompt"`
-       │ (5) Modifies files in your project directory
+       │ (4) Loads subscription auth (~/.claude.json)
+       │ (5) Executes `--resume <id> -p "prompt"`
+       │ (6) Modifies files in your project directory
        ▼
  📬 Telegram Bot replies with the execution results & diffs
 ```
@@ -42,7 +45,7 @@ A lightweight bridge that enables you to run and control **Claude Code** on a cP
 ### 1. Create a Telegram Bot
 1. Open Telegram on your phone and search for `@BotFather`.
 2. Send `/newbot`, follow the prompts, and copy the **Bot Token**.
-3. Open `@userinfobot` on Telegram to get your numeric **User ID** (used for authorization).
+3. Open `@userinfobot` on Telegram to get your numeric **User ID** (e.g., `123456789`).
 
 ### 2. (Optional) Transfer Your Claude Pro / Team Subscription
 If you have a Claude subscription and don't want to buy API credits:
@@ -75,6 +78,25 @@ If you have a Claude subscription and don't want to buy API credits:
 
 ---
 
+## Debugging with `bot.log`
+
+Whenever you want to debug:
+
+1. **Option A (Via cPanel File Manager):**  
+   Open your application folder in cPanel File Manager. You will find `bot.log`. Double-click to view or download it.
+2. **Option B (Directly on Your Phone):**  
+   Simply send `/logs` in your Telegram chat to see the latest 30 log lines (or `/logs 50` for 50 lines).
+
+Example log entries in `bot.log`:
+```text
+[2026-10-25 03:30:12] [INFO] Starting Claude Code Telegram controller... | Details: {"nodeVersion":"v20.11.0","pid":4120}
+[2026-10-25 03:31:05] [INFO] Executing Claude Code command in session: Session 1 (uuid-123) | Details: {"prompt":"Fix header color in style.css"}
+[2026-10-25 03:31:18] [INFO] Claude Code execution succeeded in 13240ms | Details: {"outputLength":482}
+[2026-10-25 03:32:00] [WARN] Unauthorized access attempt blocked | Details: {"fromId":987654321}
+```
+
+---
+
 ## Usage from Telegram
 
 | Command | Action |
@@ -82,6 +104,7 @@ If you have a Claude subscription and don't want to buy API credits:
 | *Any text* | Prompts Claude Code on the currently active session |
 | `/sessions` or `/list` | Shows clickable buttons to switch between past sessions |
 | `/new [title]` | Creates and switches to a fresh new session |
+| `/logs [count]` | Shows the latest log entries in Telegram (default: 30 lines) |
 | `/cwd` | Displays the directory Claude is currently editing |
 | `/help` | Shows command cheat sheet |
 
