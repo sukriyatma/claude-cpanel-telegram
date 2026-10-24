@@ -59,16 +59,79 @@ bot.on('polling_error', (error) => {
   log('ERROR', 'Telegram polling error', error.message);
 });
 
-// --- Safe Messaging (Handles Telegram Markdown Parsing Errors) ---
+// --- Convert Standard GitHub Markdown to Telegram HTML ---
+function mdToTelegramHtml(markdown) {
+  if (!markdown) return '';
+
+  const codeBlocks = [];
+  const inlineCodes = [];
+
+  // 1. Extract and preserve multiline code blocks (``` ... ```)
+  let text = markdown.replace(/```([a-zA-Z0-9_-]*)\n?([\s\S]*?)```/g, (match, lang, code) => {
+    const placeholder = `\x00CODEBLOCK${codeBlocks.length}\x00`;
+    const escapedCode = code
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    codeBlocks.push(`<pre><code>${escapedCode}</code></pre>`);
+    return placeholder;
+  });
+
+  // 2. Extract and preserve inline code (`...`)
+  text = text.replace(/`([^`\n]+)`/g, (match, code) => {
+    const placeholder = `\x00INLINECODE${inlineCodes.length}\x00`;
+    const escapedCode = code
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    inlineCodes.push(`<code>${escapedCode}</code>`);
+    return placeholder;
+  });
+
+  // 3. Escape HTML special characters in remaining regular text
+  text = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+  // 4. Headers: # Header -> <b>Header</b>
+  text = text.replace(/^#{1,6}\s+(.+)$/gm, '<b>$1</b>');
+
+  // 5. Bold: **text** or __text__ -> <b>text</b>
+  text = text.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+  text = text.replace(/__(.+?)__/g, '<b>$1</b>');
+
+  // 6. Italic: *text* or _text_ -> <i>text</i>
+  text = text.replace(/(?<!\w)\*([^*]+?)\*(?!\w)/g, '<i>$1</i>');
+  text = text.replace(/(?<!\w)_([^_]+?)_(?!\w)/g, '<i>$1</i>');
+
+  // 7. Markdown links: [text](url) -> <a href="url">text</a>
+  text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2">$1</a>');
+
+  // 8. Bullet points: "- " or "* " at start of line -> "• "
+  text = text.replace(/^[\*\-]\s+/gm, '• ');
+
+  // 9. Restore inline code
+  text = text.replace(/\x00INLINECODE(\d+)\x00/g, (match, index) => inlineCodes[index]);
+
+  // 10. Restore code blocks
+  text = text.replace(/\x00CODEBLOCK(\d+)\x00/g, (match, index) => codeBlocks[index]);
+
+  return text;
+}
+
+// --- Safe Messaging (Fallback to Plain Text on Format Failure) ---
 async function sendSafeMessage(chatId, text, options = {}) {
   try {
     return await bot.sendMessage(chatId, text, options);
   } catch (err) {
     log('WARN', 'Telegram send failed with formatting, retrying as plain text', err.message);
     if (options.parse_mode) {
-      delete options.parse_mode;
+      const plainOptions = { ...options };
+      delete plainOptions.parse_mode;
       try {
-        return await bot.sendMessage(chatId, text, options);
+        const cleanText = text.replace(/<[^>]+>/g, '');
+        return await bot.sendMessage(chatId, cleanText, plainOptions);
       } catch (retryErr) {
         log('ERROR', 'Telegram plain text send also failed', retryErr.message);
       }
@@ -76,12 +139,34 @@ async function sendSafeMessage(chatId, text, options = {}) {
   }
 }
 
-// Split large messages according to Telegram's 4096 character limit
-async function sendLongOutput(chatId, text) {
-  const CHUNK_SIZE = 4000;
-  for (let i = 0; i < text.length; i += CHUNK_SIZE) {
-    const chunk = text.slice(i, i + CHUNK_SIZE);
-    await sendSafeMessage(chatId, chunk);
+// Split and send formatted output while respecting Telegram's 4096 character limit
+async function sendFormattedOutput(chatId, rawMarkdown) {
+  if (!rawMarkdown) {
+    return sendSafeMessage(chatId, 'Task completed with no output.');
+  }
+
+  const html = mdToTelegramHtml(rawMarkdown);
+  const CHUNK_SIZE = 3800;
+
+  if (html.length <= CHUNK_SIZE) {
+    return await sendSafeMessage(chatId, html, { parse_mode: 'HTML' });
+  }
+
+  // Split safely by lines to avoid truncating in the middle of an HTML tag
+  const lines = html.split('\n');
+  let currentChunk = '';
+
+  for (const line of lines) {
+    if ((currentChunk + '\n' + line).length > CHUNK_SIZE) {
+      await sendSafeMessage(chatId, currentChunk, { parse_mode: 'HTML' });
+      currentChunk = line;
+    } else {
+      currentChunk = currentChunk ? (currentChunk + '\n' + line) : line;
+    }
+  }
+
+  if (currentChunk.trim().length > 0) {
+    await sendSafeMessage(chatId, currentChunk, { parse_mode: 'HTML' });
   }
 }
 
@@ -176,7 +261,6 @@ function startOAuthLogin(chatId) {
 
   activeAuthProcess = authProcess;
 
-  // Timeout after 5 minutes if user doesn't complete
   if (activeAuthTimeout) clearTimeout(activeAuthTimeout);
   activeAuthTimeout = setTimeout(() => {
     if (activeAuthProcess === authProcess) {
@@ -195,7 +279,6 @@ function startOAuthLogin(chatId) {
     outputBuffer += str;
     log('DEBUG', 'Auth stdout', str);
 
-    // Look for authorization URL
     if (!urlSent) {
       const match = outputBuffer.match(/(https:\/\/claude\.com\/cai\/oauth\/authorize\S+)/);
       if (match) {
@@ -218,7 +301,6 @@ function startOAuthLogin(chatId) {
             ]
           }
         }).catch((err) => {
-          // If inline button fails, send plain text URL
           sendSafeMessage(chatId, `${reply}\n\nURL: ${authUrl}`);
         });
       }
@@ -380,7 +462,6 @@ bot.on('message', async (msg) => {
 
     process.env.ANTHROPIC_API_KEY = key;
 
-    // Persist into .env file
     try {
       let envContent = fs.existsSync(ENV_FILE) ? fs.readFileSync(ENV_FILE, 'utf8') : '';
       if (envContent.includes('ANTHROPIC_API_KEY=')) {
@@ -506,7 +587,7 @@ bot.on('message', async (msg) => {
       }
 
       const elapsed = Date.now() - startTime;
-      const output = (stdout || stderr || error?.message || 'Task completed with no output.').trim();
+      const output = (stdout || stderr || error?.message || '').trim();
 
       if (error) {
         log('ERROR', `Claude Code execution failed after ${elapsed}ms`, {
@@ -522,7 +603,8 @@ bot.on('message', async (msg) => {
         });
       }
 
-      await sendLongOutput(chatId, output);
+      // Send output rendered with rich Telegram formatting
+      await sendFormattedOutput(chatId, output);
     });
   }
 
