@@ -1,6 +1,6 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
-const { exec } = require('child_process');
+const { exec, spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -10,6 +10,11 @@ const ALLOWED_USER_ID = process.env.TELEGRAM_USER_ID;
 const PROJECT_CWD = process.env.PROJECT_CWD || __dirname;
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 const LOG_FILE = path.join(__dirname, 'bot.log');
+const ENV_FILE = path.join(__dirname, '.env');
+
+// Track interactive authentication process
+let activeAuthProcess = null;
+let activeAuthTimeout = null;
 
 // --- Structured File Logger ---
 function log(level, message, meta = null) {
@@ -152,6 +157,97 @@ function renderSessionsMenu(chatId, messageId = null) {
   }
 }
 
+// --- Handle /login and OAuth Reauth ---
+function startOAuthLogin(chatId) {
+  if (activeAuthProcess) {
+    try {
+      activeAuthProcess.kill();
+    } catch (e) {}
+    activeAuthProcess = null;
+  }
+
+  sendSafeMessage(chatId, '🔄 Starting Claude authentication flow...');
+  log('INFO', 'Starting claude auth login process...');
+
+  const authProcess = spawn(claudeBin, ['auth', 'login'], {
+    env: process.env,
+    cwd: PROJECT_CWD
+  });
+
+  activeAuthProcess = authProcess;
+
+  // Timeout after 5 minutes if user doesn't complete
+  if (activeAuthTimeout) clearTimeout(activeAuthTimeout);
+  activeAuthTimeout = setTimeout(() => {
+    if (activeAuthProcess === authProcess) {
+      log('WARN', 'Auth process timed out after 5 minutes');
+      try { authProcess.kill(); } catch (e) {}
+      activeAuthProcess = null;
+      sendSafeMessage(chatId, '⏰ Login session timed out. Type `/login` to try again.');
+    }
+  }, 5 * 60 * 1000);
+
+  let outputBuffer = '';
+  let urlSent = false;
+
+  authProcess.stdout.on('data', (chunk) => {
+    const str = chunk.toString();
+    outputBuffer += str;
+    log('DEBUG', 'Auth stdout', str);
+
+    // Look for authorization URL
+    if (!urlSent) {
+      const match = outputBuffer.match(/(https:\/\/claude\.com\/cai\/oauth\/authorize\S+)/);
+      if (match) {
+        urlSent = true;
+        const authUrl = match[1];
+        log('INFO', 'Extracted OAuth login URL', authUrl);
+
+        const reply = 
+          '🔐 *Claude Pro / Team Login*\n\n' +
+          '1. Tap the button below to open the Claude authorization page:\n\n' +
+          '2. Sign in to your Claude account and approve access.\n\n' +
+          '3. Copy the **authorization code** shown on screen, and **paste it directly into this chat**!\n\n' +
+          '*(Type `/cancel` if you want to cancel)*';
+
+        bot.sendMessage(chatId, reply, {
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔗 Tap to Log In to Claude', url: authUrl }]
+            ]
+          }
+        }).catch((err) => {
+          // If inline button fails, send plain text URL
+          sendSafeMessage(chatId, `${reply}\n\nURL: ${authUrl}`);
+        });
+      }
+    }
+  });
+
+  authProcess.stderr.on('data', (chunk) => {
+    log('WARN', 'Auth stderr', chunk.toString());
+  });
+
+  authProcess.on('close', (code) => {
+    log('INFO', `Auth process exited with code ${code}`);
+    activeAuthProcess = null;
+    if (activeAuthTimeout) clearTimeout(activeAuthTimeout);
+
+    if (code === 0) {
+      sendSafeMessage(chatId, '🎉 *Authentication Successful!*\n\nYour Claude subscription is now connected and active. You can now send prompts!', { parse_mode: 'Markdown' });
+    } else if (code !== null && !outputBuffer.includes('Paste code here')) {
+      sendSafeMessage(chatId, `❌ Login process ended with code ${code}.\n\nOutput: ${outputBuffer.slice(-300)}`);
+    }
+  });
+
+  authProcess.on('error', (err) => {
+    log('ERROR', 'Auth process error', err.message);
+    activeAuthProcess = null;
+    sendSafeMessage(chatId, '❌ Failed to start login process: ' + err.message);
+  });
+}
+
 // --- Inline Button Callbacks ---
 bot.on('callback_query', (query) => {
   const chatId = query.message.chat.id;
@@ -220,17 +316,85 @@ bot.on('message', async (msg) => {
 
   log('DEBUG', 'Received message', { from: msg.from.username || msg.from.id, text });
 
-  // Commands
+  // Cancel ongoing auth
+  if (text === '/cancel') {
+    if (activeAuthProcess) {
+      try { activeAuthProcess.kill(); } catch (e) {}
+      activeAuthProcess = null;
+      if (activeAuthTimeout) clearTimeout(activeAuthTimeout);
+      return sendSafeMessage(chatId, '🚫 Authentication process cancelled.');
+    }
+    return sendSafeMessage(chatId, 'ℹ️ No active process to cancel.');
+  }
+
+  // If waiting for OAuth authorization code from user
+  if (activeAuthProcess) {
+    log('INFO', 'Delivering pasted auth code to Claude process...');
+    await sendSafeMessage(chatId, '⏳ Verifying your authorization code with Claude...');
+    try {
+      activeAuthProcess.stdin.write(text + '\n');
+    } catch (e) {
+      log('ERROR', 'Failed writing code to auth process stdin', e.message);
+      sendSafeMessage(chatId, '❌ Error submitting code: ' + e.message);
+    }
+    return;
+  }
+
+  // --- Commands ---
   if (text === '/start' || text === '/help') {
     const helpMsg = 
       '🤖 *Claude Code cPanel Controller*\n\n' +
       '• *Send any text:* Prompt Claude Code on active session.\n' +
+      '• `/login` or `/reauth`: Sign in with your Claude Pro/Team subscription via link.\n' +
+      '• `/status`: Check authentication status.\n' +
+      '• `/setkey <key>`: Configure an Anthropic API Key directly.\n' +
       '• `/sessions` or `/list`: View and switch sessions.\n' +
       '• `/new [name]`: Start a new named session.\n' +
       '• `/logs [lines]`: Read recent debug log entries (default 30).\n' +
       '• `/cwd`: Show current working directory.\n' +
       '• `/help`: Display this guide.';
     return sendSafeMessage(chatId, helpMsg, { parse_mode: 'Markdown' });
+  }
+
+  // Login / Reauth command
+  if (text === '/login' || text === '/auth' || text === '/reauth') {
+    return startOAuthLogin(chatId);
+  }
+
+  // Check auth status
+  if (text === '/status' || text === '/whoami') {
+    await sendSafeMessage(chatId, '🔍 Checking authentication status...');
+    exec(`"${claudeBin}" auth status < /dev/null`, { cwd: PROJECT_CWD, env: process.env }, (err, stdout, stderr) => {
+      const output = (stdout || stderr || err?.message || '').trim();
+      return sendSafeMessage(chatId, `📋 *Auth Status:*\n\`\`\`json\n${output}\n\`\`\``, { parse_mode: 'Markdown' });
+    });
+    return;
+  }
+
+  // Directly set API Key
+  if (text.startsWith('/setkey')) {
+    const key = text.replace('/setkey', '').trim();
+    if (!key || !key.startsWith('sk-ant-')) {
+      return sendSafeMessage(chatId, '⚠️ Invalid API key format. Usage:\n`/setkey sk-ant-api03-...`', { parse_mode: 'Markdown' });
+    }
+
+    process.env.ANTHROPIC_API_KEY = key;
+
+    // Persist into .env file
+    try {
+      let envContent = fs.existsSync(ENV_FILE) ? fs.readFileSync(ENV_FILE, 'utf8') : '';
+      if (envContent.includes('ANTHROPIC_API_KEY=')) {
+        envContent = envContent.replace(/#?\s*ANTHROPIC_API_KEY=.*/g, `ANTHROPIC_API_KEY=${key}`);
+      } else {
+        envContent += `\nANTHROPIC_API_KEY=${key}\n`;
+      }
+      fs.writeFileSync(ENV_FILE, envContent, 'utf8');
+      log('INFO', 'Saved ANTHROPIC_API_KEY to .env file');
+      return sendSafeMessage(chatId, '✅ *API Key saved & activated successfully!*', { parse_mode: 'Markdown' });
+    } catch (e) {
+      log('ERROR', 'Failed writing API key to .env', e.message);
+      return sendSafeMessage(chatId, '⚠️ API key activated in memory, but failed to write to .env: ' + e.message);
+    }
   }
 
   if (text === '/sessions' || text === '/list') {
@@ -317,8 +481,8 @@ bot.on('message', async (msg) => {
         return sendSafeMessage(chatId, 
           '⚠️ *Authentication Required*\n\n' +
           'Claude Code is not logged in.\n\n' +
-          '• If using API: add `ANTHROPIC_API_KEY=sk-ant-...` to your `.env`\n' +
-          '• If using Claude Pro/Team: run `claude auth login` on the server or copy `~/.claude` config.',
+          '• Type `/login` to sign in with your Claude Pro / Team account via link.\n' +
+          '• Or type `/setkey sk-ant-...` to set an API key.',
           { parse_mode: 'Markdown' }
         );
       }
@@ -362,7 +526,6 @@ bot.on('message', async (msg) => {
     });
   }
 
-  // Initial flag choice: --resume if initialized, otherwise --session-id
   const initialFlag = currentSession.initialized ? '--resume' : '--session-id';
   executeCommand(initialFlag, currentSession.id);
 });

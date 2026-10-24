@@ -1,16 +1,20 @@
 # Claude Code cPanel Controller (Telegram Bot)
 
-A lightweight bridge that enables you to run and control **Claude Code** on a cPanel web server (without SSH access) remotely from your phone using Telegram, featuring **interactive session switching** and **persistent file logging for debugging**.
+A lightweight bridge that enables you to run and control **Claude Code** on a cPanel web server (without SSH access) remotely from your phone using Telegram, featuring:
+- **Interactive OAuth `/login` from Telegram** (Sign in to your Claude Pro/Team account via link)
+- **Interactive session switching** via Telegram Inline Keyboard buttons
+- **Persistent file logging & live in-chat debugging**
 
 ---
 
 ## Features
 
 - 📱 **Control Claude from Mobile:** Send instructions and receive code modifications directly within Telegram.
+- 🔐 **One-Tap OAuth Login (`/login`):** Generates an official Anthropic OAuth authorization link directly in Telegram. Tap to login on your phone, copy the code, and paste it back into the chat!
+- 🔑 **API Key Support (`/setkey`):** Set or update your Anthropic API Key directly from Telegram.
 - 🔄 **Interactive Session Switcher:** View past sessions and switch between them using clickable inline buttons (`/sessions`).
 - 📝 **Dedicated Debug Log File (`bot.log`):** Automatically logs all messages, unauthorized attempts, Claude execution commands, timestamps, and errors.
 - 🔍 **Live In-Chat Log Inspection:** Inspect debug logs directly on your phone using `/logs [count]`.
-- 🔑 **Claude Pro / Team Subscription Support:** Use your existing Claude subscription without paying for API tokens (by uploading `~/.claude.json`).
 - ⚡ **No SSH Required:** Works completely inside cPanel's **Setup Node.js App** (Passenger daemon).
 - 🔒 **Secure:** Restricted to your personal Telegram User ID (`TELEGRAM_USER_ID`) so no unauthorized person can run commands on your server.
 - 💾 **Persistent:** Sessions and history survive server restarts (`sessions.json`).
@@ -22,18 +26,17 @@ A lightweight bridge that enables you to run and control **Claude Code** on a cP
 ```
  📱 Your Phone (Telegram)
        │
-       │ (1) Chat / Tap Session Buttons / Check /logs
+       │ (1) Chat / Tap Login Link / Switch Sessions
        ▼
  🌐 cPanel Server (Phusion Passenger / Node.js)
        │
        │ (2) Runs `bot.js` 24/7 in background
-       │ (3) Appends events & errors to `bot.log`
+       │ (3) Manages OAuth code exchange & session state
        ▼
  🤖 Claude Code Engine (`@anthropic-ai/claude-code`)
        │
-       │ (4) Loads subscription auth (~/.claude.json)
-       │ (5) Executes `--resume <id> -p "prompt"`
-       │ (6) Modifies files in your project directory
+       │ (4) Executes `--resume <id> -p "prompt"`
+       │ (5) Modifies files in your project directory
        ▼
  📬 Telegram Bot replies with the execution results & diffs
 ```
@@ -47,20 +50,7 @@ A lightweight bridge that enables you to run and control **Claude Code** on a cP
 2. Send `/newbot`, follow the prompts, and copy the **Bot Token**.
 3. Open `@userinfobot` on Telegram to get your numeric **User ID** (e.g., `123456789`).
 
-### 2. (Optional) Transfer Your Claude Pro / Team Subscription
-If you have a Claude subscription and don't want to buy API credits:
-1. On your personal computer, install and authenticate Claude Code once:
-   ```bash
-   npm install -g @anthropic-ai/claude-code
-   claude
-   ```
-   Select **Claude.ai (Pro/Team)** and log in via your browser.
-2. Locate the generated config file on your computer:
-   - **Mac/Linux:** `~/.claude.json`
-   - **Windows:** `C:\Users\<YourUser>\.claude.json`
-3. In cPanel **File Manager**, enable *Show Hidden Files*, and upload `.claude.json` to your home directory (`/home/yourusername/`).
-
-### 3. Deploy to cPanel
+### 2. Deploy to cPanel
 1. In cPanel, go to **Setup Node.js App**.
 2. Click **Create Application**:
    - **Node.js version:** Select `18` or `20`.
@@ -73,35 +63,30 @@ If you have a Claude subscription and don't want to buy API credits:
    - `TELEGRAM_TOKEN`: `your-bot-token-from-botfather`
    - `TELEGRAM_USER_ID`: `your-numeric-user-id`
    - *(Optional)* `PROJECT_CWD`: `/home/username/public_html` (folder you want Claude to edit)
-   - *(Optional if not using subscription)*: `ANTHROPIC_API_KEY`: `sk-ant-...`
 6. Click **Restart**.
 
----
-
-## Debugging with `bot.log`
-
-Whenever you want to debug:
-
-1. **Option A (Via cPanel File Manager):**  
-   Open your application folder in cPanel File Manager. You will find `bot.log`. Double-click to view or download it.
-2. **Option B (Directly on Your Phone):**  
-   Simply send `/logs` in your Telegram chat to see the latest 30 log lines (or `/logs 50` for 50 lines).
-
-Example log entries in `bot.log`:
-```text
-[2026-10-25 03:30:12] [INFO] Starting Claude Code Telegram controller... | Details: {"nodeVersion":"v20.11.0","pid":4120}
-[2026-10-25 03:31:05] [INFO] Executing Claude Code command in session: Session 1 (uuid-123) | Details: {"prompt":"Fix header color in style.css"}
-[2026-10-25 03:31:18] [INFO] Claude Code execution succeeded in 13240ms | Details: {"outputLength":482}
-[2026-10-25 03:32:00] [WARN] Unauthorized access attempt blocked | Details: {"fromId":987654321}
-```
+### 3. Log In from Telegram (No SSH Needed!)
+Once the bot is running:
+1. Open your Telegram bot and type:
+   ```text
+   /login
+   ```
+2. The bot sends a button: **🔗 Tap to Log In to Claude**.
+3. Tap the link to open the Claude authorization page in your mobile browser.
+4. Sign in with your Claude Pro / Team account and click **Authorize**.
+5. Copy the code displayed on your screen, and paste it directly into your Telegram chat.
+6. The bot confirms authentication, and you are ready to code!
 
 ---
 
-## Usage from Telegram
+## Usage Commands
 
 | Command | Action |
 |---|---|
 | *Any text* | Prompts Claude Code on the currently active session |
+| `/login` or `/reauth` | Generates a sign-in link to connect your Claude Pro/Team account |
+| `/status` | Checks your current authentication status |
+| `/setkey <api-key>` | Directly saves an Anthropic API Key (`sk-ant-...`) |
 | `/sessions` or `/list` | Shows clickable buttons to switch between past sessions |
 | `/new [title]` | Creates and switches to a fresh new session |
 | `/logs [count]` | Shows the latest log entries in Telegram (default: 30 lines) |
