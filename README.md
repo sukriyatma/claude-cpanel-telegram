@@ -1,46 +1,52 @@
 # Claude Code cPanel Controller (Telegram Bot)
 
 A lightweight bridge that enables you to run and control **Claude Code** on a cPanel web server (without SSH access) remotely from your phone using Telegram, featuring:
+- **Simultaneous Multi-Folder Access (`/adddir`, `/dirs`):** Give Claude access to multiple project directories at the same time using `--add-dir`.
 - **Interactive Permission Control (`/mode`):** Switch between Auto-Accept Edits, Full Autonomous, and Safe Plan modes with one tap.
 - **Interactive OAuth `/login` from Telegram:** Sign in to your Claude Pro/Team account via link.
-- **Interactive session switching:** Toggle between separate tasks with Telegram inline buttons (`/sessions`).
+- **Interactive Session Switching (`/sessions`):** Toggle between separate tasks with Telegram inline buttons.
 - **Rich Markdown Formatting:** Automatically renders Claude's output with bold headers, bullet lists, monospace badges, and copyable code blocks.
 - **Persistent file logging & live in-chat debugging:** Inspect logs on your phone via `/logs`.
 
 ---
 
-## Features
+## Simultaneous Multi-Folder Access
 
-- 📱 **Control Claude from Mobile:** Send instructions and receive code modifications directly within Telegram.
-- ⚙️ **One-Tap Permission Mode (`/mode`):** Control whether Claude can auto-edit files, run shell commands, or run in read-only mode.
-- 🔐 **One-Tap OAuth Login (`/login`):** Generates an official Anthropic OAuth authorization link directly in Telegram. Tap to login on your phone, copy the code, and paste it back into the chat!
-- 🔑 **API Key Support (`/setkey`):** Set or update your Anthropic API Key directly from Telegram.
-- 🔄 **Interactive Session Switcher:** View past sessions and switch between them using clickable inline buttons (`/sessions`).
-- 📝 **Dedicated Debug Log File (`bot.log`):** Automatically logs all messages, unauthorized attempts, Claude execution commands, timestamps, and errors.
-- 🔍 **Live In-Chat Log Inspection:** Inspect debug logs directly on your phone using `/logs [count]`.
-- ⚡ **No SSH Required:** Works completely inside cPanel's **Setup Node.js App** (Passenger daemon).
-- 🔒 **Secure:** Restricted to your personal Telegram User ID (`TELEGRAM_USER_ID`) so no unauthorized person can run commands on your server.
-- 💾 **Persistent:** Sessions and history survive server restarts (`sessions.json`).
+Claude Code supports working across multiple folders at once using the `--add-dir` flag. This allows Claude to edit files in your main site while reading libraries or configs from another folder:
+
+| Command | Action |
+|---|---|
+| `/dirs` or `/folders` | Lists the primary working directory and all additional accessible folders |
+| `/adddir <path>` | Grants Claude access to another folder simultaneously |
+| `/rmdir <path>` | Revokes access to an additional folder |
+| `/cd <path>` | Changes the primary working directory (`cwd`) |
+| `/cleardirs` | Clears all additional folder permissions |
+
+*Note: Paths can be absolute (`/home/user/public_html`), relative (`../other-app`), or use home shortcuts (`~/api`).*
 
 ---
 
 ## Permission Modes (`/mode`)
 
-In headless mode, nobody is sitting at a terminal to type `y` or `n`. You can control permissions on the fly using `/mode`:
+In headless mode, you can control approvals directly from Telegram:
 
 | Mode | Flag | Description |
 |---|---|---|
-| **✍️ Auto-Accept Edits** *(Default)* | `--permission-mode acceptEdits` | Allows Claude to read, create, and modify project files automatically without prompting, but prevents running unapproved shell commands. |
+| **✍️ Auto-Accept Edits** *(Default)* | `--permission-mode acceptEdits` | Allows Claude to read, create, and modify project files automatically across all allowed folders without prompting. |
 | **🚀 Full Autonomous** | `--dangerously-skip-permissions` | Complete automation: allows editing files **and** executing shell/terminal commands (`npm`, `git`, build scripts). |
 | **🛡️ Safe / Plan Only** | `--permission-mode plan` | Read-only mode: Claude inspects code, reviews, and answers questions, but cannot make any file edits. |
 
 ---
 
-## Usage Commands
+## All Telegram Commands
 
 | Command | Action |
 |---|---|
-| *Any text* | Prompts Claude Code on the currently active session |
+| *Any text* | Prompts Claude Code on the active session across all configured folders |
+| `/dirs` | Displays all configured directories (primary + additional) |
+| `/adddir <path>` | Adds an additional folder for simultaneous access |
+| `/rmdir <path>` | Removes an additional folder |
+| `/cd <path>` | Switches primary working directory |
 | `/mode` | Interactive menu to toggle permission approvals (Edits, Full Auto, Safe) |
 | `/sessions` or `/list` | Shows clickable buttons to switch between past sessions |
 | `/new [title]` | Creates and switches to a fresh new session |
@@ -48,7 +54,6 @@ In headless mode, nobody is sitting at a terminal to type `y` or `n`. You can co
 | `/status` | Checks your current authentication status |
 | `/setkey <api-key>` | Directly saves an Anthropic API Key (`sk-ant-...`) |
 | `/logs [count]` | Shows the latest log entries in Telegram (default: 30 lines) |
-| `/cwd` | Displays the directory Claude is currently editing |
 | `/help` | Shows command cheat sheet |
 
 ---
@@ -72,7 +77,8 @@ In headless mode, nobody is sitting at a terminal to type `y` or `n`. You can co
 5. In the same Node.js setup page, scroll down to **Environment Variables** and add:
    - `TELEGRAM_TOKEN`: `your-bot-token-from-botfather`
    - `TELEGRAM_USER_ID`: `your-numeric-user-id`
-   - *(Optional)* `PROJECT_CWD`: `/home/username/public_html` (folder you want Claude to edit)
+   - *(Optional)* `PROJECT_CWD`: `/home/username/public_html`
+   - *(Optional)* `EXTRA_DIRS`: `/home/username/api,/home/username/shared`
 6. Click **Restart**.
 
 ### 3. Log In from Telegram

@@ -3,11 +3,12 @@ const TelegramBot = require('node-telegram-bot-api');
 const { exec, spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const crypto = require('crypto');
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const ALLOWED_USER_ID = process.env.TELEGRAM_USER_ID;
-const PROJECT_CWD = process.env.PROJECT_CWD || __dirname;
+let PROJECT_CWD = process.env.PROJECT_CWD || __dirname;
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 const LOG_FILE = path.join(__dirname, 'bot.log');
 const ENV_FILE = path.join(__dirname, '.env');
@@ -15,6 +16,20 @@ const ENV_FILE = path.join(__dirname, '.env');
 // Track interactive authentication process
 let activeAuthProcess = null;
 let activeAuthTimeout = null;
+
+// --- Helper: Path Resolver (supports ~, relative, and absolute paths) ---
+function resolvePath(userPath) {
+  if (!userPath) return null;
+  let p = userPath.trim();
+  if (p.startsWith('~/')) {
+    p = path.join(os.homedir(), p.slice(2));
+  } else if (p === '~') {
+    p = os.homedir();
+  } else if (!path.isAbsolute(p)) {
+    p = path.resolve(PROJECT_CWD, p);
+  }
+  return path.normalize(p);
+}
 
 // --- Structured File Logger ---
 function log(level, message, meta = null) {
@@ -169,13 +184,15 @@ async function sendFormattedOutput(chatId, rawMarkdown) {
   }
 }
 
-// --- Session Store Management ---
+// --- Session & Multi-Directory Store Management ---
 function loadSessions() {
   if (fs.existsSync(SESSIONS_FILE)) {
     try {
       const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
       if (data && Array.isArray(data.list) && data.activeId) {
         if (!data.permissionMode) data.permissionMode = 'acceptEdits';
+        if (!Array.isArray(data.extraDirs)) data.extraDirs = [];
+        if (data.primaryCwd) PROJECT_CWD = data.primaryCwd;
         return data;
       }
     } catch (e) {
@@ -186,7 +203,9 @@ function loadSessions() {
   const defaultId = crypto.randomUUID();
   const initialData = {
     activeId: defaultId,
-    permissionMode: 'acceptEdits', // 'acceptEdits', 'bypass', or 'plan'
+    permissionMode: 'acceptEdits',
+    primaryCwd: PROJECT_CWD,
+    extraDirs: process.env.EXTRA_DIRS ? process.env.EXTRA_DIRS.split(',').map(s => s.trim()).filter(Boolean) : [],
     list: [{
       id: defaultId,
       title: 'Default Session',
@@ -479,6 +498,10 @@ bot.on('message', async (msg) => {
     const helpMsg = 
       '🤖 *Claude Code cPanel Controller*\n\n' +
       '• *Send any text:* Prompt Claude Code on active session.\n' +
+      '• `/dirs`: View all accessible folders (simultaneous multi-folder access).\n' +
+      '• `/adddir <path>`: Grant Claude access to an additional folder.\n' +
+      '• `/rmdir <path>`: Revoke access to an additional folder.\n' +
+      '• `/cd <path>`: Switch primary working directory.\n' +
       '• `/mode`: Configure permission approval mode (Edits, Full Auto, Safe).\n' +
       '• `/sessions` or `/list`: View and switch sessions.\n' +
       '• `/new [name]`: Start a new named session.\n' +
@@ -486,9 +509,113 @@ bot.on('message', async (msg) => {
       '• `/status`: Check authentication status.\n' +
       '• `/setkey <key>`: Configure an Anthropic API Key directly.\n' +
       '• `/logs [lines]`: Read recent debug log entries (default 30).\n' +
-      '• `/cwd`: Show current working directory.\n' +
       '• `/help`: Display this guide.';
     return sendSafeMessage(chatId, helpMsg, { parse_mode: 'Markdown' });
+  }
+
+  // View all accessible folders
+  if (text === '/dirs' || text === '/folders' || text === '/cwd') {
+    const data = loadSessions();
+    const extraDirs = data.extraDirs || [];
+
+    let msg = `📁 *Accessible Folders for Claude:*\n\n`;
+    msg += `• *Primary Working Dir (\`cwd\`):*\n  \`${PROJECT_CWD}\`\n\n`;
+
+    if (extraDirs.length > 0) {
+      msg += `• *Simultaneous Additional Folders (\`--add-dir\`):*\n`;
+      extraDirs.forEach((dir, i) => {
+        const exists = fs.existsSync(dir);
+        msg += `  ${i + 1}. \`${dir}\` ${exists ? '✅' : '❌ (Path not found)'}\n`;
+      });
+    } else {
+      msg += `• *Simultaneous Additional Folders:*\n  _None configured yet._\n`;
+    }
+
+    msg += `\n*Manage Folders:*\n`;
+    msg += `• \`/adddir <path>\` to grant access to another folder\n`;
+    msg += `• \`/rmdir <path>\` to remove an additional folder\n`;
+    msg += `• \`/cd <path>\` to change primary working directory\n`;
+    msg += `• \`/cleardirs\` to clear all extra folders\n`;
+
+    return sendSafeMessage(chatId, msg, { parse_mode: 'Markdown' });
+  }
+
+  // Add additional folder access
+  if (text.startsWith('/adddir')) {
+    const rawPath = text.replace('/adddir', '').trim();
+    if (!rawPath) {
+      return sendSafeMessage(chatId, '⚠️ Please specify a path. Example:\n`/adddir /home/username/public_html/api`', { parse_mode: 'Markdown' });
+    }
+
+    const resolved = resolvePath(rawPath);
+    if (!fs.existsSync(resolved)) {
+      return sendSafeMessage(chatId, `❌ Directory does not exist:\n\`${resolved}\``, { parse_mode: 'Markdown' });
+    }
+
+    const stat = fs.statSync(resolved);
+    if (!stat.isDirectory()) {
+      return sendSafeMessage(chatId, `❌ Path is a file, not a directory:\n\`${resolved}\``, { parse_mode: 'Markdown' });
+    }
+
+    const data = loadSessions();
+    if (!Array.isArray(data.extraDirs)) data.extraDirs = [];
+
+    if (!data.extraDirs.includes(resolved)) {
+      data.extraDirs.push(resolved);
+      saveSessions(data);
+      log('INFO', 'Added extra accessible directory', resolved);
+      return sendSafeMessage(chatId, `✅ *Granted access to folder:*\n\`${resolved}\`\n\nClaude can now read, search, and edit files in this folder simultaneously!`, { parse_mode: 'Markdown' });
+    } else {
+      return sendSafeMessage(chatId, `ℹ️ Directory is already in the allowed list:\n\`${resolved}\``, { parse_mode: 'Markdown' });
+    }
+  }
+
+  // Remove additional folder access
+  if (text.startsWith('/rmdir')) {
+    const rawPath = text.replace('/rmdir', '').trim();
+    if (!rawPath) {
+      return sendSafeMessage(chatId, '⚠️ Please specify a path. Usage:\n`/rmdir <path>`', { parse_mode: 'Markdown' });
+    }
+
+    const resolved = resolvePath(rawPath);
+    const data = loadSessions();
+    if (!Array.isArray(data.extraDirs) || !data.extraDirs.includes(resolved)) {
+      return sendSafeMessage(chatId, `ℹ️ Folder not found in allowed list:\n\`${resolved}\``, { parse_mode: 'Markdown' });
+    }
+
+    data.extraDirs = data.extraDirs.filter(d => d !== resolved);
+    saveSessions(data);
+    log('INFO', 'Removed extra directory', resolved);
+    return sendSafeMessage(chatId, `🗑️ *Removed folder access:*\n\`${resolved}\``, { parse_mode: 'Markdown' });
+  }
+
+  // Clear all additional folders
+  if (text === '/cleardirs') {
+    const data = loadSessions();
+    data.extraDirs = [];
+    saveSessions(data);
+    return sendSafeMessage(chatId, '🧹 Cleared all additional accessible folders.', { parse_mode: 'Markdown' });
+  }
+
+  // Switch primary working directory
+  if (text.startsWith('/cd')) {
+    const rawPath = text.replace('/cd', '').trim();
+    if (!rawPath) {
+      return sendSafeMessage(chatId, `📁 Current working directory: \`${PROJECT_CWD}\`\n\nUsage: \`/cd /path/to/folder\``, { parse_mode: 'Markdown' });
+    }
+
+    const resolved = resolvePath(rawPath);
+    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+      return sendSafeMessage(chatId, `❌ Invalid directory:\n\`${resolved}\``, { parse_mode: 'Markdown' });
+    }
+
+    PROJECT_CWD = resolved;
+    const data = loadSessions();
+    data.primaryCwd = resolved;
+    saveSessions(data);
+
+    log('INFO', 'Switched primary working directory', resolved);
+    return sendSafeMessage(chatId, `📂 *Switched primary directory to:*\n\`${resolved}\``, { parse_mode: 'Markdown' });
   }
 
   // Permission mode switcher
@@ -557,10 +684,6 @@ bot.on('message', async (msg) => {
     return sendSafeMessage(chatId, `✨ Started new session: *${customTitle}*. Type your task below!`, { parse_mode: 'Markdown' });
   }
 
-  if (text === '/cwd') {
-    return sendSafeMessage(chatId, `📁 Working Directory: \`${PROJECT_CWD}\``, { parse_mode: 'Markdown' });
-  }
-
   if (text.startsWith('/logs')) {
     const parts = text.split(' ');
     const count = parseInt(parts[1], 10) || 30;
@@ -585,6 +708,10 @@ bot.on('message', async (msg) => {
   const data = loadSessions();
   const currentSession = getActiveSession(data);
   const currentMode = data.permissionMode || 'acceptEdits';
+  const extraDirs = (data.extraDirs || []).filter(d => fs.existsSync(d));
+
+  // Build --add-dir flags for simultaneous multi-folder access
+  const addDirFlags = extraDirs.map(d => `--add-dir "${d}"`).join(' ');
 
   // Determine permission flag
   let permissionFlag = '--permission-mode acceptEdits';
@@ -601,7 +728,8 @@ bot.on('message', async (msg) => {
     saveSessions(data);
   }
 
-  await sendSafeMessage(chatId, `⏳ Running in *${currentSession.title}* [${currentMode}]...`, { parse_mode: 'Markdown' });
+  const folderCount = extraDirs.length + 1;
+  await sendSafeMessage(chatId, `⏳ Running in *${currentSession.title}* [${currentMode}] (${folderCount} folder${folderCount > 1 ? 's' : ''})...`, { parse_mode: 'Markdown' });
 
   const safePrompt = text.replace(/"/g, '\\"');
   const startTime = Date.now();
@@ -609,14 +737,17 @@ bot.on('message', async (msg) => {
   log('INFO', `Executing Claude Code command in session: ${currentSession.title} (${currentSession.id})`, {
     permissionMode: currentMode,
     permissionFlag,
+    primaryCwd: PROJECT_CWD,
+    extraDirs,
     initialized: !!currentSession.initialized,
-    prompt: text,
-    cwd: PROJECT_CWD
+    prompt: text
   });
 
   // Self-healing execution handler that handles --resume vs --session-id automatically
   function executeCommand(flag, sessionId, retryCount = 0) {
-    const command = `"${claudeBin}" ${flag} "${sessionId}" ${permissionFlag} -p "${safePrompt}" < /dev/null`;
+    // Construct command with --add-dir flags
+    const extraArgs = [permissionFlag, addDirFlags].filter(Boolean).join(' ');
+    const command = `"${claudeBin}" ${flag} "${sessionId}" ${extraArgs} -p "${safePrompt}" < /dev/null`;
 
     exec(command, {
       cwd: PROJECT_CWD,
