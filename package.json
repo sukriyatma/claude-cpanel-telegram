@@ -1,0 +1,23 @@
+{
+  "name": "claude-cpanel-telegram",
+  "version": "1.0.0",
+  "description": "Remote controller for Claude Code on cPanel via Telegram with interactive session management",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "keywords": [
+    "claude-code",
+    "cpanel",
+    "telegram-bot",
+    "anthropic",
+    "remote-coding"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "latest",
+    "dotenv": "^16.4.5",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
