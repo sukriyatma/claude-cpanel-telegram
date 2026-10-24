@@ -20,10 +20,8 @@ function log(level, message, meta = null) {
   }
   entry += '\n';
 
-  // Output to standard console (cPanel passenger logs)
   process.stdout.write(entry);
 
-  // Append to bot.log file for easy debugging
   try {
     fs.appendFileSync(LOG_FILE, entry, 'utf8');
   } catch (err) {
@@ -86,7 +84,10 @@ async function sendLongOutput(chatId, text) {
 function loadSessions() {
   if (fs.existsSync(SESSIONS_FILE)) {
     try {
-      return JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+      const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+      if (data && Array.isArray(data.list) && data.activeId) {
+        return data;
+      }
     } catch (e) {
       log('ERROR', 'Failed parsing sessions.json, reinitializing default session', e.message);
     }
@@ -98,7 +99,8 @@ function loadSessions() {
     list: [{
       id: defaultId,
       title: 'Default Session',
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      initialized: false
     }]
   };
   saveSessions(initialData);
@@ -170,6 +172,7 @@ bot.on('callback_query', (query) => {
       id: newId,
       title: `Session ${data.list.length + 1}`,
       createdAt: Date.now(),
+      initialized: false,
       isNew: true
     };
     data.list.push(newSession);
@@ -238,7 +241,13 @@ bot.on('message', async (msg) => {
     const customTitle = text.replace('/new', '').trim() || `Session ${Date.now().toString().slice(-4)}`;
     const data = loadSessions();
     const newId = crypto.randomUUID();
-    data.list.push({ id: newId, title: customTitle, createdAt: Date.now(), isNew: true });
+    data.list.push({
+      id: newId,
+      title: customTitle,
+      createdAt: Date.now(),
+      initialized: false,
+      isNew: true
+    });
     data.activeId = newId;
     saveSessions(data);
     log('INFO', 'New session created via command', { sessionId: newId, title: customTitle });
@@ -249,7 +258,6 @@ bot.on('message', async (msg) => {
     return sendSafeMessage(chatId, `📁 Working Directory: \`${PROJECT_CWD}\``, { parse_mode: 'Markdown' });
   }
 
-  // --- /logs command to view debug logs right in Telegram ---
   if (text.startsWith('/logs')) {
     const parts = text.split(' ');
     const count = parseInt(parts[1], 10) || 30;
@@ -274,7 +282,7 @@ bot.on('message', async (msg) => {
   const data = loadSessions();
   const currentSession = getActiveSession(data);
 
-  // Auto-name new session from first prompt
+  // Auto-name session from first prompt if newly created
   if (currentSession.isNew) {
     currentSession.title = text.slice(0, 30) + (text.length > 30 ? '...' : '');
     delete currentSession.isNew;
@@ -283,12 +291,19 @@ bot.on('message', async (msg) => {
 
   await sendSafeMessage(chatId, `⏳ Running in *${currentSession.title}*...`, { parse_mode: 'Markdown' });
 
-  // Escape prompt for shell execution
   const safePrompt = text.replace(/"/g, '\\"');
-  const command = `"${claudeBin}" --resume "${currentSession.id}" -p "${safePrompt}"`;
-
   const startTime = Date.now();
+
+  // Use --resume if initialized, otherwise use --session-id to initialize the session.
+  // Redirect stdin from /dev/null (< /dev/null) to skip the 3-second stdin wait warning.
+  const sessionFlag = currentSession.initialized
+    ? `--resume "${currentSession.id}"`
+    : `--session-id "${currentSession.id}"`;
+
+  const command = `"${claudeBin}" ${sessionFlag} -p "${safePrompt}" < /dev/null`;
+
   log('INFO', `Executing Claude Code command in session: ${currentSession.title} (${currentSession.id})`, {
+    initialized: !!currentSession.initialized,
     prompt: text,
     cwd: PROJECT_CWD
   });
@@ -298,6 +313,34 @@ bot.on('message', async (msg) => {
     env: process.env,
     maxBuffer: 1024 * 1024 * 10 // 10MB buffer
   }, async (error, stdout, stderr) => {
+    const combinedOutput = ((stderr || '') + (stdout || '') + (error?.message || '')).trim();
+
+    // Auto-recovery: If --resume failed because the session was not found on disk, fallback to --session-id
+    if (error && currentSession.initialized && combinedOutput.includes('No conversation found with session ID')) {
+      log('WARN', `Session ${currentSession.id} not found by --resume, auto-recovering with --session-id...`);
+      currentSession.initialized = false;
+      const fallbackCommand = `"${claudeBin}" --session-id "${currentSession.id}" -p "${safePrompt}" < /dev/null`;
+
+      return exec(fallbackCommand, {
+        cwd: PROJECT_CWD,
+        env: process.env,
+        maxBuffer: 1024 * 1024 * 10
+      }, async (fbErr, fbStdout, fbStderr) => {
+        const elapsed = Date.now() - startTime;
+        const fbOutput = (fbStdout || fbStderr || fbErr?.message || 'Task completed with no output.').trim();
+
+        if (!fbErr) {
+          currentSession.initialized = true;
+          saveSessions(data);
+          log('INFO', `Claude Code auto-recovery succeeded in ${elapsed}ms`, { outputLength: fbOutput.length });
+        } else {
+          log('ERROR', `Claude Code auto-recovery failed after ${elapsed}ms`, { error: fbErr.message });
+        }
+
+        await sendLongOutput(chatId, fbOutput);
+      });
+    }
+
     const elapsed = Date.now() - startTime;
     const output = (stdout || stderr || error?.message || 'Task completed with no output.').trim();
 
@@ -307,6 +350,9 @@ bot.on('message', async (msg) => {
         stderr: stderr?.trim()
       });
     } else {
+      // Mark session as initialized once successfully run
+      currentSession.initialized = true;
+      saveSessions(data);
       log('INFO', `Claude Code execution succeeded in ${elapsed}ms`, {
         outputLength: output.length
       });
