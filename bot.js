@@ -1,6 +1,6 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
-const { exec, spawn } = require('child_process');
+const { exec, spawn, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -15,25 +15,83 @@ const LOG_FILE = path.join(__dirname, 'bot.log');
 const ENV_FILE = path.join(__dirname, '.env');
 const PID_FILE = path.join(__dirname, 'bot.pid');
 
-// Save PID file for service stopping
+// --- Single-Instance Guard & PID File Management ---
+function isPidRunningBot(pid) {
+  try {
+    process.kill(pid, 0); // Check if process is alive
+  } catch (e) {
+    return false; // Process does not exist / not alive
+  }
+
+  // If alive, verify if it is running bot.js
+  try {
+    const cmd = execSync(`ps -p ${pid} -o command= 2>/dev/null || ps -p ${pid} -o args= 2>/dev/null || true`, { encoding: 'utf8' }).trim();
+    if (cmd) {
+      return cmd.includes('bot.js');
+    }
+  } catch (e) {}
+
+  // Linux /proc fallback
+  try {
+    if (fs.existsSync(`/proc/${pid}/cmdline`)) {
+      const procCmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+      return procCmd.includes('bot.js');
+    }
+  } catch (e) {}
+
+  // If process is alive and ps inspection was restricted, treat as alive bot instance
+  return true;
+}
+
+// Check if another active instance already owns bot.pid
+if (fs.existsSync(PID_FILE)) {
+  try {
+    const existingPid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
+    if (!isNaN(existingPid) && existingPid !== process.pid) {
+      if (isPidRunningBot(existingPid)) {
+        console.error(`\n❌ Error: Another instance of claude-cpanel-telegram is already running (PID: ${existingPid}).`);
+        console.error(`💡 Only one instance can poll Telegram with this bot token at a time.`);
+        console.error(`   • Stop existing instance : npm stop          (or: kill ${existingPid})`);
+        console.error(`   • Stop ALL instances     : npm run stop:all  (or: node stop-all.js)\n`);
+        process.exit(1);
+      } else {
+        // PID file exists but process is dead or was recycled to an unrelated process
+        console.warn(`[WARN] Removing stale PID file for inactive process (PID: ${existingPid}).`);
+        try { fs.unlinkSync(PID_FILE); } catch (e) {}
+      }
+    }
+  } catch (e) {}
+}
+
+// Safely register our PID
 try {
   fs.writeFileSync(PID_FILE, process.pid.toString(), 'utf8');
-} catch (e) {}
+} catch (e) {
+  console.error('[WARN] Unable to write bot.pid:', e.message);
+}
+
+// Only remove PID file if this process owns it
+function safeRemovePidFile() {
+  try {
+    if (fs.existsSync(PID_FILE)) {
+      const ownerPid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
+      if (ownerPid === process.pid) {
+        fs.unlinkSync(PID_FILE);
+      }
+    }
+  } catch (e) {}
+}
 
 // Graceful cleanup on shutdown
 function cleanupAndExit(code = 0) {
-  try {
-    if (fs.existsSync(PID_FILE)) fs.unlinkSync(PID_FILE);
-  } catch (e) {}
+  safeRemovePidFile();
   process.exit(code);
 }
 
 process.on('SIGINT', () => cleanupAndExit(0));
 process.on('SIGTERM', () => cleanupAndExit(0));
 process.on('exit', () => {
-  try {
-    if (fs.existsSync(PID_FILE)) fs.unlinkSync(PID_FILE);
-  } catch (e) {}
+  safeRemovePidFile();
 });
 
 // Track interactive authentication process
@@ -95,6 +153,10 @@ const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
 bot.on('polling_error', (error) => {
   log('ERROR', 'Telegram polling error', error.message);
+  if (error.message && error.message.includes('409 Conflict')) {
+    log('FATAL', 'Detected Telegram 409 Conflict: Another bot instance is polling Telegram with this token. Exiting to prevent dual-processing.');
+    cleanupAndExit(1);
+  }
 });
 
 // --- Convert Standard GitHub Markdown to Telegram HTML ---

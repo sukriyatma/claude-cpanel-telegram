@@ -69,6 +69,7 @@ Resuming sessions (`--resume <uuid>`) in Claude Code re-sends the entire past co
 npm start
 # or: node bot.js
 ```
+> **Single-Instance Guard:** The bot checks `bot.pid` at startup. If another live instance is already running, it prevents duplicate startup to avoid dual-polling and Telegram 409 Conflict errors. Cleanup only deletes `bot.pid` if owned by the terminating process.
 
 ### Stopping Single Instance
 1. **Via Telegram:** Send `/stop` or `/shutdown` in your Telegram chat.
