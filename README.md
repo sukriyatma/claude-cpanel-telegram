@@ -1,6 +1,7 @@
 # Claude Code cPanel Controller (Telegram Bot)
 
 A lightweight bridge that enables you to run and control **Claude Code** on a cPanel web server (without SSH access) remotely from your phone using Telegram, featuring:
+- **Real-Time Live Progress Monitoring:** Watch Claude work in real time! The bot displays and updates an in-chat status card showing every file read, search, edit, and bash command as it happens.
 - **Simultaneous Multi-Folder Access (`/adddir`, `/dirs`):** Give Claude access to multiple project directories at the same time using `--add-dir`.
 - **Interactive Permission Control (`/mode`):** Switch between Auto-Accept Edits, Full Autonomous, and Safe Plan modes with one tap.
 - **Interactive OAuth `/login` from Telegram:** Sign in to your Claude Pro/Team account via link.
@@ -8,6 +9,34 @@ A lightweight bridge that enables you to run and control **Claude Code** on a cP
 - **Rich Markdown Formatting & Auto-Chunking:** Automatically renders Claude's output with bold headers, bullet lists, monospace badges, and copyable code blocks without message-length errors.
 - **Service Management (`npm start`, `npm stop`, `npm run stop:all`, `/stop`):** Easily start, stop, or terminate all instances anytime.
 - **Persistent file logging & live in-chat debugging:** Inspect logs on your phone via `/logs`.
+
+---
+
+## Real-Time Live Progress Monitoring
+
+When you send a prompt, the bot sends a **Live Activity Card** and continuously edits it in place as Claude works:
+
+```text
+⏳ Claude is working... [acceptEdits]
+Session: Main Site (2 folders)
+
+🛠️ Live Activity:
+✓ 📖 Reading index.html
+✓ 🔍 Searching codebase for 'handleLogin'
+▶️ ✍️ Editing auth.php...
+```
+
+When finished, the card updates to:
+```text
+✅ Task Completed! (5.2s)
+Session: Main Site
+
+🛠️ Actions performed:
+• 📖 Reading index.html
+• 🔍 Searching codebase for 'handleLogin'
+• ✍️ Editing auth.php
+```
+...and the final formatted answer/diff is delivered cleanly below!
 
 ---
 
@@ -27,24 +56,17 @@ npm start
 
 ### Stopping ALL Instances & Subprocesses
 If you accidentally ran multiple background processes or want to completely kill all bot runners and Claude subprocesses:
-1. **Via NPM:**
-   ```bash
-   npm run stop:all
-   ```
-2. **Via Node:**
-   ```bash
-   node stop-all.js
-   ```
-3. **Via Bash Script:**
-   ```bash
-   ./stop-all.sh
-   ```
+```bash
+npm run stop:all
+# or: node stop-all.js
+# or: ./stop-all.sh
+```
 
 ---
 
 ## Simultaneous Multi-Folder Access
 
-Claude Code supports working across multiple folders at once using the `--add-dir` flag. This allows Claude to edit files in your main site while reading libraries or configs from another folder:
+Claude Code supports working across multiple folders at once using the `--add-dir` flag:
 
 | Command | Action |
 |---|---|
@@ -72,7 +94,7 @@ In headless mode, you can control approvals directly from Telegram:
 
 | Command | Action |
 |---|---|
-| *Any text* | Prompts Claude Code on the active session across all configured folders |
+| *Any text* | Prompts Claude Code with real-time live activity tracking |
 | `/dirs` | Displays all configured directories (primary + additional) |
 | `/adddir <path>` | Adds an additional folder for simultaneous access |
 | `/rmdir <path>` | Removes an additional folder |

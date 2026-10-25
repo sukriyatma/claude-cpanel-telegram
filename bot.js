@@ -83,7 +83,7 @@ if (!TELEGRAM_TOKEN) {
   cleanupAndExit(1);
 }
 
-log('INFO', 'Starting Claude Code Telegram controller...', {
+log('INFO', 'Starting Claude Code Telegram controller with Live Progress Monitoring...', {
   nodeVersion: process.version,
   pid: process.pid,
   projectCwd: PROJECT_CWD,
@@ -157,7 +157,7 @@ function mdToTelegramHtml(markdown) {
   return text;
 }
 
-// --- Split HTML into Safe Chunks Keeping Tags Balanced (<3500 chars) ---
+// --- Split HTML into Safe Chunks Keeping Tags Balanced (<3200 chars) ---
 function splitHtmlMessage(html, maxChunkSize = 3200) {
   if (!html) return [];
   if (html.length <= maxChunkSize) return [html];
@@ -190,14 +190,12 @@ function splitHtmlMessage(html, maxChunkSize = 3200) {
     if (!currentChunk.trim()) return;
     let chunkToSend = currentChunk;
 
-    // Automatically close tags if cut across chunk boundary
     if (inPre && !chunkToSend.endsWith('</code></pre>')) chunkToSend += '</code></pre>';
     if (inBold && !chunkToSend.endsWith('</b>')) chunkToSend += '</b>';
     if (inItalic && !chunkToSend.endsWith('</i>')) chunkToSend += '</i>';
 
     chunks.push(chunkToSend);
 
-    // Reopen tags in next chunk so formatting continues seamlessly
     currentChunk = '';
     if (inPre) currentChunk += '<pre><code>';
     if (inBold) currentChunk += '<b>';
@@ -281,6 +279,39 @@ async function sendFormattedOutput(chatId, rawMarkdown) {
   for (const chunk of chunks) {
     await sendSafeMessage(chatId, chunk, { parse_mode: 'HTML' });
   }
+}
+
+// --- Helper: Format Tool Activity for Live Status Card ---
+function formatToolActivity(item) {
+  const name = item.name;
+  const input = item.input || {};
+
+  if (name === 'Read') {
+    const file = path.basename(input.file_path || input.path || 'file');
+    return `📖 Reading <code>${file}</code>`;
+  }
+  if (name === 'Edit') {
+    const file = path.basename(input.file_path || input.path || 'file');
+    return `✍️ Editing <code>${file}</code>`;
+  }
+  if (name === 'Write') {
+    const file = path.basename(input.file_path || input.path || 'file');
+    return `📝 Creating <code>${file}</code>`;
+  }
+  if (name === 'Bash') {
+    const cmd = (input.command || '').trim().slice(0, 32);
+    return `💻 Running <code>${cmd}${cmd.length >= 32 ? '...' : ''}</code>`;
+  }
+  if (name === 'Glob' || name === 'Grep') {
+    return `🔍 Searching codebase & files...`;
+  }
+  if (name === 'WebSearch' || name === 'WebFetch') {
+    return `🌐 Searching documentation...`;
+  }
+  if (name === 'Task') {
+    return `🤖 Executing subtask...`;
+  }
+  return `🔧 Tool: <code>${name}</code>`;
 }
 
 // --- Session & Multi-Directory Store Management ---
@@ -606,7 +637,7 @@ bot.on('message', async (msg) => {
   if (text === '/start' || text === '/help') {
     const helpMsg = 
       '🤖 *Claude Code cPanel Controller*\n\n' +
-      '• *Send any text:* Prompt Claude Code on active session.\n' +
+      '• *Send any text:* Prompt Claude Code with real-time live activity monitoring.\n' +
       '• `/dirs`: View all accessible folders (simultaneous multi-folder access).\n' +
       '• `/adddir <path>`: Grant Claude access to an additional folder.\n' +
       '• `/rmdir <path>`: Revoke access to an additional folder.\n' +
@@ -815,22 +846,14 @@ bot.on('message', async (msg) => {
     }
   }
 
-  // --- Process Claude Code Instruction ---
+  // =========================================================================
+  // --- Process Claude Code Instruction with Real-Time Live Monitoring ---
+  // =========================================================================
+
   const data = loadSessions();
   const currentSession = getActiveSession(data);
   const currentMode = data.permissionMode || 'acceptEdits';
   const extraDirs = (data.extraDirs || []).filter(d => fs.existsSync(d));
-
-  // Build --add-dir flags for simultaneous multi-folder access
-  const addDirFlags = extraDirs.map(d => `--add-dir "${d}"`).join(' ');
-
-  // Determine permission flag
-  let permissionFlag = '--permission-mode acceptEdits';
-  if (currentMode === 'bypass') {
-    permissionFlag = '--dangerously-skip-permissions';
-  } else if (currentMode === 'plan') {
-    permissionFlag = '--permission-mode plan';
-  }
 
   // Auto-name session from first prompt if newly created
   if (currentSession.isNew) {
@@ -840,85 +863,232 @@ bot.on('message', async (msg) => {
   }
 
   const folderCount = extraDirs.length + 1;
-  await sendSafeMessage(chatId, `⏳ Running in *${currentSession.title}* [${currentMode}] (${folderCount} folder${folderCount > 1 ? 's' : ''})...`, { parse_mode: 'Markdown' });
-
-  const safePrompt = text.replace(/"/g, '\\"');
   const startTime = Date.now();
+
+  // Send initial Live Status Card message in Telegram
+  const initialStatusText = 
+    `⏳ <b>Claude is working...</b> [${currentMode}]\n` +
+    `Session: <code>${currentSession.title}</code> (${folderCount} folder${folderCount > 1 ? 's' : ''})\n\n` +
+    `🛠️ <b>Live Activity:</b>\n` +
+    `▶️ 🚀 Initializing session & tools...`;
+
+  const statusMsg = await bot.sendMessage(chatId, initialStatusText, { parse_mode: 'HTML' });
+  const statusMsgId = statusMsg.message_id;
+
+  // Typing indicator interval (Telegram typing action lasts 5 seconds)
+  const typingInterval = setInterval(() => {
+    bot.sendChatAction(chatId, 'typing').catch(() => {});
+  }, 4000);
+  bot.sendChatAction(chatId, 'typing').catch(() => {});
 
   log('INFO', `Executing Claude Code command in session: ${currentSession.title} (${currentSession.id})`, {
     permissionMode: currentMode,
-    permissionFlag,
     primaryCwd: PROJECT_CWD,
     extraDirs,
     initialized: !!currentSession.initialized,
     prompt: text
   });
 
-  // Self-healing execution handler that handles --resume vs --session-id automatically
-  function executeCommand(flag, sessionId, retryCount = 0) {
-    const extraArgs = [permissionFlag, addDirFlags].filter(Boolean).join(' ');
-    const command = `"${claudeBin}" ${flag} "${sessionId}" ${extraArgs} -p "${safePrompt}" < /dev/null`;
+  // Track activity stream
+  const activities = [];
+  let lastStatusUpdate = 0;
+  let pendingUpdateTimer = null;
 
-    exec(command, {
+  // Throttled function to update Telegram live status card
+  function updateLiveStatusCard(finished = false, durationSec = null) {
+    const now = Date.now();
+    const MIN_INTERVAL = 1400; // Throttle to stay within Telegram rate limits
+
+    const render = async () => {
+      lastStatusUpdate = Date.now();
+      let cardText = '';
+
+      if (finished) {
+        cardText = 
+          `✅ <b>Task Completed!</b> (${durationSec}s)\n` +
+          `Session: <code>${currentSession.title}</code>\n\n`;
+        if (activities.length > 0) {
+          cardText += `🛠️ <b>Actions performed:</b>\n` +
+            activities.slice(-5).map(a => `• ${a}`).join('\n');
+        }
+      } else {
+        cardText = 
+          `⏳ <b>Claude is working...</b> [${currentMode}]\n` +
+          `Session: <code>${currentSession.title}</code>\n\n`;
+        if (activities.length > 0) {
+          const recent = activities.slice(-4);
+          cardText += `🛠️ <b>Live Activity:</b>\n` +
+            recent.map((a, i) => (i === recent.length - 1 ? `▶️ ${a}` : `✓ ${a}`)).join('\n');
+        } else {
+          cardText += `🛠️ <b>Live Activity:</b>\n▶️ 🚀 Analyzing prompt...`;
+        }
+      }
+
+      try {
+        await bot.editMessageText(cardText, {
+          chat_id: chatId,
+          message_id: statusMsgId,
+          parse_mode: 'HTML'
+        });
+      } catch (e) {
+        // Ignore Telegram messageNotModified errors
+      }
+    };
+
+    if (finished) {
+      if (pendingUpdateTimer) clearTimeout(pendingUpdateTimer);
+      return render();
+    }
+
+    if (now - lastStatusUpdate >= MIN_INTERVAL) {
+      if (pendingUpdateTimer) clearTimeout(pendingUpdateTimer);
+      render();
+    } else if (!pendingUpdateTimer) {
+      pendingUpdateTimer = setTimeout(() => {
+        pendingUpdateTimer = null;
+        render();
+      }, MIN_INTERVAL - (now - lastStatusUpdate));
+    }
+  }
+
+  // --- Real-Time Execution Handler using spawn + stream-json ---
+  function executeWithLiveStream(flag, sessionId, retryCount = 0) {
+    // Build CLI arguments
+    const args = [
+      flag, sessionId,
+      '--output-format', 'stream-json',
+      '--verbose',
+      '-p', text
+    ];
+
+    if (currentMode === 'bypass') {
+      args.push('--dangerously-skip-permissions');
+    } else if (currentMode === 'plan') {
+      args.push('--permission-mode', 'plan');
+    } else {
+      args.push('--permission-mode', 'acceptEdits');
+    }
+
+    extraDirs.forEach((dir) => {
+      args.push('--add-dir', dir);
+    });
+
+    const claudeProc = spawn(claudeBin, args, {
       cwd: PROJECT_CWD,
       env: process.env,
-      maxBuffer: 1024 * 1024 * 10 // 10MB buffer
-    }, async (error, stdout, stderr) => {
-      const combined = ((stderr || '') + ' ' + (stdout || '') + ' ' + (error ? error.message : '')).trim();
+      stdio: ['ignore', 'pipe', 'pipe'] // Closes stdin immediately (< /dev/null equivalent)
+    });
+
+    let rawStdout = '';
+    let rawStderr = '';
+    let finalResult = null;
+
+    let stdoutBuffer = '';
+
+    claudeProc.stdout.on('data', (chunk) => {
+      stdoutBuffer += chunk.toString();
+      rawStdout += chunk.toString();
+
+      const lines = stdoutBuffer.split('\n');
+      // Keep unfinished line in buffer
+      stdoutBuffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line);
+
+          // Detect tool executions (Read, Edit, Write, Bash, etc.)
+          if (event.type === 'assistant' && event.message?.content) {
+            for (const item of event.message.content) {
+              if (item.type === 'tool_use') {
+                const activityStr = formatToolActivity(item);
+                if (!activities.includes(activityStr)) {
+                  activities.push(activityStr);
+                  log('INFO', `Live Tool: ${item.name}`, item.input);
+                  updateLiveStatusCard(false);
+                }
+              }
+            }
+          }
+
+          // Capture final result
+          if (event.type === 'result') {
+            finalResult = event.result;
+          }
+        } catch (e) {
+          // Not a JSON line, ignore
+        }
+      }
+    });
+
+    claudeProc.stderr.on('data', (chunk) => {
+      rawStderr += chunk.toString();
+    });
+
+    claudeProc.on('close', async (exitCode) => {
+      clearInterval(typingInterval);
+      const elapsed = Date.now() - startTime;
+      const elapsedSec = (elapsed / 1000).toFixed(1);
+
+      const combined = (rawStderr + ' ' + rawStdout).trim();
 
       // Case 1: Not logged in
       if (combined.includes('Not logged in') || combined.includes('Please run /login')) {
         log('ERROR', 'Claude is not authenticated', { combined });
+        try {
+          await bot.editMessageText('⚠️ <b>Authentication Required:</b> Claude Code is not logged in.', {
+            chat_id: chatId,
+            message_id: statusMsgId,
+            parse_mode: 'HTML'
+          });
+        } catch (e) {}
         return sendSafeMessage(chatId, 
-          '⚠️ *Authentication Required*\n\n' +
-          'Claude Code is not logged in.\n\n' +
           '• Type `/login` to sign in with your Claude Pro / Team account via link.\n' +
           '• Or type `/setkey sk-ant-...` to set an API key.',
           { parse_mode: 'Markdown' }
         );
       }
 
-      // Case 2: Session ID already in use -> Switch to --resume
-      if (error && combined.includes('already in use') && retryCount === 0) {
+      // Case 2: Session ID already in use -> Auto-recover with --resume
+      if (exitCode !== 0 && combined.includes('already in use') && retryCount === 0) {
         log('WARN', `Session ${sessionId} already in use, auto-recovering with --resume...`);
         currentSession.initialized = true;
         saveSessions(data);
-        return executeCommand('--resume', sessionId, retryCount + 1);
+        return executeWithLiveStream('--resume', sessionId, retryCount + 1);
       }
 
-      // Case 3: No conversation found with session ID -> Generate fresh ID and use --session-id
-      if (error && combined.includes('No conversation found') && retryCount === 0) {
+      // Case 3: No conversation found -> Auto-recover with fresh ID
+      if (exitCode !== 0 && combined.includes('No conversation found') && retryCount === 0) {
         const freshId = crypto.randomUUID();
-        log('WARN', `Session ${sessionId} has no prior conversation on disk, recovering with fresh ID: ${freshId}...`);
+        log('WARN', `Session ${sessionId} not found on disk, recovering with fresh ID: ${freshId}...`);
         currentSession.id = freshId;
         currentSession.initialized = false;
         saveSessions(data);
-        return executeCommand('--session-id', freshId, retryCount + 1);
+        return executeWithLiveStream('--session-id', freshId, retryCount + 1);
       }
 
-      const elapsed = Date.now() - startTime;
-      const output = (stdout || stderr || error?.message || '').trim();
+      // Update Live Status Card to Completed
+      await updateLiveStatusCard(true, elapsedSec);
 
-      if (error) {
-        log('ERROR', `Claude Code execution failed after ${elapsed}ms`, {
-          error: error.message,
-          stdout: stdout?.trim(),
-          stderr: stderr?.trim()
-        });
+      // Determine final output
+      const resultText = finalResult || rawStdout.trim() || rawStderr.trim() || (exitCode === 0 ? 'Task completed successfully.' : `Process exited with code ${exitCode}.`);
+
+      if (exitCode !== 0) {
+        log('ERROR', `Claude Code failed after ${elapsed}ms`, { exitCode, stderr: rawStderr.trim() });
       } else {
         currentSession.initialized = true;
         saveSessions(data);
-        log('INFO', `Claude Code execution succeeded in ${elapsed}ms`, {
-          outputLength: output.length
-        });
+        log('INFO', `Claude Code succeeded in ${elapsed}ms`, { outputLength: resultText.length });
       }
 
-      await sendFormattedOutput(chatId, output);
+      // Send the full formatted result as separate markdown message(s)
+      await sendFormattedOutput(chatId, resultText);
     });
   }
 
   const initialFlag = currentSession.initialized ? '--resume' : '--session-id';
-  executeCommand(initialFlag, currentSession.id);
+  executeWithLiveStream(initialFlag, currentSession.id);
 });
 
 log('INFO', 'Claude Code Telegram controller is now listening.');
