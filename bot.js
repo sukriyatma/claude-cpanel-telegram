@@ -135,8 +135,81 @@ function mdToTelegramHtml(markdown) {
   return text;
 }
 
-// --- Safe Messaging (Fallback to Plain Text on Format Failure) ---
-async function sendSafeMessage(chatId, text, options = {}) {
+// --- Split HTML into Safe Chunks Keeping Tags Balanced (<3500 chars) ---
+function splitHtmlMessage(html, maxChunkSize = 3200) {
+  if (!html) return [];
+  if (html.length <= maxChunkSize) return [html];
+
+  const chunks = [];
+  const lines = html.split('\n');
+  let currentChunk = '';
+  let inPre = false;
+  let inBold = false;
+  let inItalic = false;
+
+  function updateTagState(str) {
+    const preOpens = (str.match(/<pre>/g) || []).length;
+    const preCloses = (str.match(/<\/pre>/g) || []).length;
+    if (preOpens > preCloses) inPre = true;
+    else if (preCloses > preOpens) inPre = false;
+
+    const bOpens = (str.match(/<b>/g) || []).length;
+    const bCloses = (str.match(/<\/b>/g) || []).length;
+    if (bOpens > bCloses) inBold = true;
+    else if (bCloses > bOpens) inBold = false;
+
+    const iOpens = (str.match(/<i>/g) || []).length;
+    const iCloses = (str.match(/<\/i>/g) || []).length;
+    if (iOpens > iCloses) inItalic = true;
+    else if (iCloses > iOpens) inItalic = false;
+  }
+
+  function flushChunk() {
+    if (!currentChunk.trim()) return;
+    let chunkToSend = currentChunk;
+
+    // Automatically close tags if cut across chunk boundary
+    if (inPre && !chunkToSend.endsWith('</code></pre>')) chunkToSend += '</code></pre>';
+    if (inBold && !chunkToSend.endsWith('</b>')) chunkToSend += '</b>';
+    if (inItalic && !chunkToSend.endsWith('</i>')) chunkToSend += '</i>';
+
+    chunks.push(chunkToSend);
+
+    // Reopen tags in next chunk so formatting continues seamlessly
+    currentChunk = '';
+    if (inPre) currentChunk += '<pre><code>';
+    if (inBold) currentChunk += '<b>';
+    if (inItalic) currentChunk += '<i>';
+  }
+
+  for (let line of lines) {
+    // If a single line exceeds maxChunkSize, slice it safely
+    while (line.length > maxChunkSize) {
+      const slicePart = line.slice(0, maxChunkSize);
+      line = line.slice(maxChunkSize);
+      currentChunk += (currentChunk ? '\n' : '') + slicePart;
+      updateTagState(slicePart);
+      flushChunk();
+    }
+
+    if ((currentChunk + '\n' + line).length > maxChunkSize) {
+      flushChunk();
+    }
+
+    currentChunk = currentChunk ? (currentChunk + '\n' + line) : line;
+    updateTagState(line);
+  }
+
+  if (currentChunk.trim()) {
+    flushChunk();
+  }
+
+  return chunks;
+}
+
+// --- Single Message Sender with Plain Text Fallback ---
+async function sendSingleMessage(chatId, text, options = {}) {
+  if (!text) return;
   try {
     return await bot.sendMessage(chatId, text, options);
   } catch (err) {
@@ -146,6 +219,13 @@ async function sendSafeMessage(chatId, text, options = {}) {
       delete plainOptions.parse_mode;
       try {
         const cleanText = text.replace(/<[^>]+>/g, '');
+        // Guard plain text length
+        if (cleanText.length > 3500) {
+          for (let i = 0; i < cleanText.length; i += 3500) {
+            await bot.sendMessage(chatId, cleanText.slice(i, i + 3500), plainOptions);
+          }
+          return;
+        }
         return await bot.sendMessage(chatId, cleanText, plainOptions);
       } catch (retryErr) {
         log('ERROR', 'Telegram plain text send also failed', retryErr.message);
@@ -154,33 +234,33 @@ async function sendSafeMessage(chatId, text, options = {}) {
   }
 }
 
-// Split and send formatted output while respecting Telegram's 4096 character limit
+// --- Universal Safe Message Dispatcher (Hard Limit Guarantee: Never Exceeds 3500 chars) ---
+async function sendSafeMessage(chatId, text, options = {}) {
+  if (!text) return;
+  const HARD_LIMIT = 3500;
+
+  // If text is already plain or markdown and exceeds limit, split safely
+  if (text.length > HARD_LIMIT && options.parse_mode !== 'HTML') {
+    for (let i = 0; i < text.length; i += HARD_LIMIT) {
+      await sendSingleMessage(chatId, text.slice(i, i + HARD_LIMIT), options);
+    }
+    return;
+  }
+
+  return await sendSingleMessage(chatId, text, options);
+}
+
+// --- Formatted Output Dispatcher ---
 async function sendFormattedOutput(chatId, rawMarkdown) {
   if (!rawMarkdown) {
     return sendSafeMessage(chatId, 'Task completed with no output.');
   }
 
   const html = mdToTelegramHtml(rawMarkdown);
-  const CHUNK_SIZE = 3800;
+  const chunks = splitHtmlMessage(html, 3200);
 
-  if (html.length <= CHUNK_SIZE) {
-    return await sendSafeMessage(chatId, html, { parse_mode: 'HTML' });
-  }
-
-  const lines = html.split('\n');
-  let currentChunk = '';
-
-  for (const line of lines) {
-    if ((currentChunk + '\n' + line).length > CHUNK_SIZE) {
-      await sendSafeMessage(chatId, currentChunk, { parse_mode: 'HTML' });
-      currentChunk = line;
-    } else {
-      currentChunk = currentChunk ? (currentChunk + '\n' + line) : line;
-    }
-  }
-
-  if (currentChunk.trim().length > 0) {
-    await sendSafeMessage(chatId, currentChunk, { parse_mode: 'HTML' });
+  for (const chunk of chunks) {
+    await sendSafeMessage(chatId, chunk, { parse_mode: 'HTML' });
   }
 }
 
@@ -631,9 +711,9 @@ bot.on('message', async (msg) => {
   // Check auth status
   if (text === '/status' || text === '/whoami') {
     await sendSafeMessage(chatId, '🔍 Checking authentication status...');
-    exec(`"${claudeBin}" auth status < /dev/null`, { cwd: PROJECT_CWD, env: process.env }, (err, stdout, stderr) => {
+    exec(`"${claudeBin}" auth status < /dev/null`, { cwd: PROJECT_CWD, env: process.env }, async (err, stdout, stderr) => {
       const output = (stdout || stderr || err?.message || '').trim();
-      return sendSafeMessage(chatId, `📋 *Auth Status:*\n\`\`\`json\n${output}\n\`\`\``, { parse_mode: 'Markdown' });
+      return await sendFormattedOutput(chatId, '```json\n' + output + '\n```');
     });
     return;
   }
@@ -684,6 +764,7 @@ bot.on('message', async (msg) => {
     return sendSafeMessage(chatId, `✨ Started new session: *${customTitle}*. Type your task below!`, { parse_mode: 'Markdown' });
   }
 
+  // Debug logs inspection
   if (text.startsWith('/logs')) {
     const parts = text.split(' ');
     const count = parseInt(parts[1], 10) || 30;
@@ -696,8 +777,8 @@ bot.on('message', async (msg) => {
       const content = fs.readFileSync(LOG_FILE, 'utf8');
       const lines = content.trim().split('\n');
       const recent = lines.slice(-count).join('\n');
-      const reply = `📄 *Recent ${Math.min(count, lines.length)} log lines:*\n\`\`\`text\n${recent}\n\`\`\``;
-      return sendSafeMessage(chatId, reply, { parse_mode: 'Markdown' });
+      await sendSafeMessage(chatId, `📄 *Recent ${Math.min(count, lines.length)} log lines:*`, { parse_mode: 'Markdown' });
+      return await sendFormattedOutput(chatId, '```text\n' + recent + '\n```');
     } catch (err) {
       log('ERROR', 'Failed reading log file', err.message);
       return sendSafeMessage(chatId, '❌ Error reading log file: ' + err.message);
@@ -745,7 +826,6 @@ bot.on('message', async (msg) => {
 
   // Self-healing execution handler that handles --resume vs --session-id automatically
   function executeCommand(flag, sessionId, retryCount = 0) {
-    // Construct command with --add-dir flags
     const extraArgs = [permissionFlag, addDirFlags].filter(Boolean).join(' ');
     const command = `"${claudeBin}" ${flag} "${sessionId}" ${extraArgs} -p "${safePrompt}" < /dev/null`;
 
