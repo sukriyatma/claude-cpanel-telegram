@@ -336,7 +336,7 @@ function loadSessions() {
   const initialData = {
     activeId: defaultId,
     permissionMode: 'acceptEdits',
-    selectedModel: 'sonnet', // 'sonnet' or 'haiku'
+    selectedModel: 'sonnet', // 'sonnet', 'opus', 'haiku', 'fable'
     primaryCwd: PROJECT_CWD,
     extraDirs: process.env.EXTRA_DIRS ? process.env.EXTRA_DIRS.split(',').map(s => s.trim()).filter(Boolean) : [],
     list: [{
@@ -439,7 +439,9 @@ function renderModelMenu(chatId, messageId = null) {
 
   const models = [
     { key: 'sonnet', label: '🧠 Claude Sonnet', desc: 'Deep coding, multi-file architecture & reasoning (Default)' },
-    { key: 'haiku', label: '⚡ Claude Haiku', desc: 'Fast, lightweight & ~75% cheaper token cost' }
+    { key: 'opus', label: '👑 Claude Opus', desc: 'Maximum intelligence, deep reasoning & complex problem solving' },
+    { key: 'haiku', label: '⚡ Claude Haiku', desc: 'Fast, lightweight & ~75% cheaper token cost' },
+    { key: 'fable', label: '🔮 Claude Fable', desc: 'Specialized frontier reasoning & creative analysis' }
   ];
 
   let text = '🤖 *Select AI Model*\n\n';
@@ -691,7 +693,7 @@ bot.on('message', async (msg) => {
       '• *Send any text:* Prompt Claude Code on active session.\n' +
       '• `/ask <question>`: Quick one-off query without session history (saves tokens!).\n' +
       '• `/compact`: Compress active session history (cuts token size by 70–85%).\n' +
-      '• `/model`: Switch AI model (🧠 Sonnet vs ⚡ Haiku ~75% cheaper).\n' +
+      '• `/model`: Switch AI model (🧠 Sonnet, 👑 Opus, ⚡ Haiku, 🔮 Fable).\n' +
       '• `/dirs`: View all accessible folders (simultaneous multi-folder access).\n' +
       '• `/adddir <path>`: Grant Claude access to an additional folder.\n' +
       '• `/rmdir <path>`: Revoke access to an additional folder.\n' +
