@@ -12,6 +12,28 @@ let PROJECT_CWD = process.env.PROJECT_CWD || __dirname;
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 const LOG_FILE = path.join(__dirname, 'bot.log');
 const ENV_FILE = path.join(__dirname, '.env');
+const PID_FILE = path.join(__dirname, 'bot.pid');
+
+// Save PID file for service stopping
+try {
+  fs.writeFileSync(PID_FILE, process.pid.toString(), 'utf8');
+} catch (e) {}
+
+// Graceful cleanup on shutdown
+function cleanupAndExit(code = 0) {
+  try {
+    if (fs.existsSync(PID_FILE)) fs.unlinkSync(PID_FILE);
+  } catch (e) {}
+  process.exit(code);
+}
+
+process.on('SIGINT', () => cleanupAndExit(0));
+process.on('SIGTERM', () => cleanupAndExit(0));
+process.on('exit', () => {
+  try {
+    if (fs.existsSync(PID_FILE)) fs.unlinkSync(PID_FILE);
+  } catch (e) {}
+});
 
 // Track interactive authentication process
 let activeAuthProcess = null;
@@ -58,7 +80,7 @@ const claudeBin = process.env.CLAUDE_BIN || (
 
 if (!TELEGRAM_TOKEN) {
   log('FATAL', 'TELEGRAM_TOKEN is missing in environment variables.');
-  process.exit(1);
+  cleanupAndExit(1);
 }
 
 log('INFO', 'Starting Claude Code Telegram controller...', {
@@ -183,7 +205,6 @@ function splitHtmlMessage(html, maxChunkSize = 3200) {
   }
 
   for (let line of lines) {
-    // If a single line exceeds maxChunkSize, slice it safely
     while (line.length > maxChunkSize) {
       const slicePart = line.slice(0, maxChunkSize);
       line = line.slice(maxChunkSize);
@@ -219,7 +240,6 @@ async function sendSingleMessage(chatId, text, options = {}) {
       delete plainOptions.parse_mode;
       try {
         const cleanText = text.replace(/<[^>]+>/g, '');
-        // Guard plain text length
         if (cleanText.length > 3500) {
           for (let i = 0; i < cleanText.length; i += 3500) {
             await bot.sendMessage(chatId, cleanText.slice(i, i + 3500), plainOptions);
@@ -239,7 +259,6 @@ async function sendSafeMessage(chatId, text, options = {}) {
   if (!text) return;
   const HARD_LIMIT = 3500;
 
-  // If text is already plain or markdown and exceeds limit, split safely
   if (text.length > HARD_LIMIT && options.parse_mode !== 'HTML') {
     for (let i = 0; i < text.length; i += HARD_LIMIT) {
       await sendSingleMessage(chatId, text.slice(i, i + HARD_LIMIT), options);
@@ -549,6 +568,16 @@ bot.on('message', async (msg) => {
 
   log('DEBUG', 'Received message', { from: msg.from.username || msg.from.id, text });
 
+  // Stop service command
+  if (text === '/stop' || text === '/shutdown') {
+    await sendSafeMessage(chatId, '🛑 *Stopping Claude Code controller service...*\n\nThe daemon will terminate now.', { parse_mode: 'Markdown' });
+    log('INFO', 'Service stopped via Telegram /stop command.');
+    setTimeout(() => {
+      cleanupAndExit(0);
+    }, 1000);
+    return;
+  }
+
   // Cancel ongoing auth
   if (text === '/cancel') {
     if (activeAuthProcess) {
@@ -589,6 +618,7 @@ bot.on('message', async (msg) => {
       '• `/status`: Check authentication status.\n' +
       '• `/setkey <key>`: Configure an Anthropic API Key directly.\n' +
       '• `/logs [lines]`: Read recent debug log entries (default 30).\n' +
+      '• `/stop`: Gracefully stop the controller daemon.\n' +
       '• `/help`: Display this guide.';
     return sendSafeMessage(chatId, helpMsg, { parse_mode: 'Markdown' });
   }

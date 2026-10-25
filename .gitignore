@@ -2,6 +2,7 @@ node_modules/
 .env
 sessions.json
 .claude.json
+bot.pid
 *.log
 npm-debug.log*
 .DS_Store

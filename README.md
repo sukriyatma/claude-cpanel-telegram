@@ -5,8 +5,37 @@ A lightweight bridge that enables you to run and control **Claude Code** on a cP
 - **Interactive Permission Control (`/mode`):** Switch between Auto-Accept Edits, Full Autonomous, and Safe Plan modes with one tap.
 - **Interactive OAuth `/login` from Telegram:** Sign in to your Claude Pro/Team account via link.
 - **Interactive Session Switching (`/sessions`):** Toggle between separate tasks with Telegram inline buttons.
-- **Rich Markdown Formatting:** Automatically renders Claude's output with bold headers, bullet lists, monospace badges, and copyable code blocks.
+- **Rich Markdown Formatting & Auto-Chunking:** Automatically renders Claude's output with bold headers, bullet lists, monospace badges, and copyable code blocks without message-length errors.
+- **Service Management (`npm start`, `npm stop`, `/stop`):** Easily start or stop the controller daemon anytime.
 - **Persistent file logging & live in-chat debugging:** Inspect logs on your phone via `/logs`.
+
+---
+
+## Starting and Stopping the Service
+
+### Starting
+```bash
+npm start
+# or: node bot.js
+```
+
+### Stopping
+You have 4 easy ways to stop the service:
+
+1. **Via Telegram (From your phone):**
+   Send `/stop` or `/shutdown` in your Telegram chat.
+2. **Via NPM:**
+   ```bash
+   npm stop
+   ```
+3. **Via Node:**
+   ```bash
+   node stop.js
+   ```
+4. **Via Bash Script:**
+   ```bash
+   ./stop.sh
+   ```
 
 ---
 
@@ -21,8 +50,6 @@ Claude Code supports working across multiple folders at once using the `--add-di
 | `/rmdir <path>` | Revokes access to an additional folder |
 | `/cd <path>` | Changes the primary working directory (`cwd`) |
 | `/cleardirs` | Clears all additional folder permissions |
-
-*Note: Paths can be absolute (`/home/user/public_html`), relative (`../other-app`), or use home shortcuts (`~/api`).*
 
 ---
 
@@ -54,6 +81,7 @@ In headless mode, you can control approvals directly from Telegram:
 | `/status` | Checks your current authentication status |
 | `/setkey <api-key>` | Directly saves an Anthropic API Key (`sk-ant-...`) |
 | `/logs [count]` | Shows the latest log entries in Telegram (default: 30 lines) |
+| `/stop` | Gracefully terminates the running controller daemon |
 | `/help` | Shows command cheat sheet |
 
 ---

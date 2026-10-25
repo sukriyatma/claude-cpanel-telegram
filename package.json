@@ -4,7 +4,8 @@
   "description": "Remote controller for Claude Code on cPanel via Telegram with interactive session management",
   "main": "bot.js",
   "scripts": {
-    "start": "node bot.js"
+    "start": "node bot.js",
+    "stop": "node stop.js"
   },
   "keywords": [
     "claude-code",
@@ -13,7 +14,7 @@
     "anthropic",
     "remote-coding"
   ],
-  "author": "",
+  "author": "sukriyatma <muhammadsukriyatma@gmail.com>",
   "license": "MIT",
   "dependencies": {
     "@anthropic-ai/claude-code": "latest",
