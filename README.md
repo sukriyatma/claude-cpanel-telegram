@@ -6,7 +6,7 @@ A lightweight bridge that enables you to run and control **Claude Code** on a cP
 - **Interactive OAuth `/login` from Telegram:** Sign in to your Claude Pro/Team account via link.
 - **Interactive Session Switching (`/sessions`):** Toggle between separate tasks with Telegram inline buttons.
 - **Rich Markdown Formatting & Auto-Chunking:** Automatically renders Claude's output with bold headers, bullet lists, monospace badges, and copyable code blocks without message-length errors.
-- **Service Management (`npm start`, `npm stop`, `/stop`):** Easily start or stop the controller daemon anytime.
+- **Service Management (`npm start`, `npm stop`, `npm run stop:all`, `/stop`):** Easily start, stop, or terminate all instances anytime.
 - **Persistent file logging & live in-chat debugging:** Inspect logs on your phone via `/logs`.
 
 ---
@@ -19,22 +19,25 @@ npm start
 # or: node bot.js
 ```
 
-### Stopping
-You have 4 easy ways to stop the service:
+### Stopping Single Instance
+1. **Via Telegram:** Send `/stop` or `/shutdown` in your Telegram chat.
+2. **Via NPM:** `npm stop`
+3. **Via Node:** `node stop.js`
+4. **Via Bash:** `./stop.sh`
 
-1. **Via Telegram (From your phone):**
-   Send `/stop` or `/shutdown` in your Telegram chat.
-2. **Via NPM:**
+### Stopping ALL Instances & Subprocesses
+If you accidentally ran multiple background processes or want to completely kill all bot runners and Claude subprocesses:
+1. **Via NPM:**
    ```bash
-   npm stop
+   npm run stop:all
    ```
-3. **Via Node:**
+2. **Via Node:**
    ```bash
-   node stop.js
+   node stop-all.js
    ```
-4. **Via Bash Script:**
+3. **Via Bash Script:**
    ```bash
-   ./stop.sh
+   ./stop-all.sh
    ```
 
 ---

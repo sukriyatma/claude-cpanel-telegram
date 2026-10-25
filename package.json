@@ -5,7 +5,8 @@
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
-    "stop": "node stop.js"
+    "stop": "node stop.js",
+    "stop:all": "node stop-all.js"
   },
   "keywords": [
     "claude-code",
