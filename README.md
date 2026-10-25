@@ -74,6 +74,14 @@ npm start
 3. **Via Node:** `node stop.js`
 4. **Via Bash:** `./stop.sh`
 
+### Inspecting All Running Instances
+To see all active bot processes, Claude CLI workers, PID file status, CPU/memory, and uptimes:
+
+1. **Via Telegram:** Send `/instances` or `/ps` in your Telegram chat.
+2. **Via NPM:** `npm run instances` (or `npm run ps`)
+3. **Via Node:** `node instances.js` (add `--json` for structured JSON output)
+4. **Via Bash:** `./instances.sh`
+
 ### Stopping ALL Instances & Subprocesses
 If you accidentally ran multiple background processes or want to completely kill all bot runners and Claude subprocesses:
 ```bash
@@ -127,6 +135,7 @@ In headless mode, you can control approvals directly from Telegram:
 | `/new [title]` | Creates and switches to a fresh new session |
 | `/login` or `/reauth` | Generates a sign-in link to connect your Claude Pro/Team account |
 | `/status` | Checks your current authentication status |
+| `/instances` or `/ps` | Inspects all active bot daemons, Claude subprocesses, CPU/mem & PIDs |
 | `/setkey <api-key>` | Directly saves an Anthropic API Key (`sk-ant-...`) |
 | `/logs [count]` | Shows the latest log entries in Telegram (default: 30 lines) |
 | `/stop` | Gracefully terminates the running controller daemon |

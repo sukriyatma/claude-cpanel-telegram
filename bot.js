@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
+const { getRunningInstances } = require('./instances');
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const ALLOWED_USER_ID = process.env.TELEGRAM_USER_ID;
@@ -700,6 +701,7 @@ bot.on('message', async (msg) => {
       '• `/new [name]`: Start a new named session.\n' +
       '• `/login` or `/reauth`: Sign in with your Claude Pro/Team subscription.\n' +
       '• `/status`: Check authentication status.\n' +
+      '• `/instances` or `/ps`: Inspect all running bot & Claude instances.\n' +
       '• `/setkey <key>`: Configure an Anthropic API Key directly.\n' +
       '• `/logs [lines]`: Read recent debug log entries (default 30).\n' +
       '• `/stop`: Gracefully stop the controller daemon.\n' +
@@ -835,6 +837,28 @@ bot.on('message', async (msg) => {
       return await sendFormattedOutput(chatId, '```json\n' + output + '\n```');
     });
     return;
+  }
+
+  // Inspect all running instances
+  if (text === '/instances' || text === '/ps') {
+    const data = getRunningInstances({ callerPid: process.pid });
+    let reply = `📊 <b>Active Instances Inspector</b>\n\n`;
+    reply += `• <b>Total Active:</b> ${data.count} instance(s)\n`;
+    reply += `• <b>bot.pid Status:</b> <code>${data.pidFile.status}</code>\n\n`;
+
+    if (data.count === 0) {
+      reply += `🟢 <i>No active instances or background subprocesses detected.</i>`;
+    } else {
+      reply += `<b>Active Processes:</b>\n`;
+      data.instances.forEach((inst, idx) => {
+        reply += `${idx + 1}. <b>${inst.type}</b> (PID: <code>${inst.pid}</code>)\n`;
+        reply += `   └ CPU: <code>${inst.cpu}</code> | Mem: <code>${inst.mem}</code> | Uptime: <code>${inst.etime}</code>\n`;
+        reply += `   └ Registered in PID file: <b>${inst.registered ? 'Yes ✅' : 'No ⚠️ (Unregistered/Child)'}</b>\n`;
+      });
+      reply += `\n💡 <i>To stop everything, send /stop or run <code>npm run stop:all</code> on the server.</i>`;
+    }
+
+    return sendSafeMessage(chatId, reply, { parse_mode: 'HTML' });
   }
 
   // Directly set API Key

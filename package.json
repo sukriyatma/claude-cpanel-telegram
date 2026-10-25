@@ -6,7 +6,10 @@
   "scripts": {
     "start": "node bot.js",
     "stop": "node stop.js",
-    "stop:all": "node stop-all.js"
+    "stop:all": "node stop-all.js",
+    "instances": "node instances.js",
+    "get:instances": "node instances.js",
+    "ps": "node instances.js"
   },
   "keywords": [
     "claude-code",
