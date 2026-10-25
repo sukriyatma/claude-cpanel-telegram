@@ -83,7 +83,7 @@ if (!TELEGRAM_TOKEN) {
   cleanupAndExit(1);
 }
 
-log('INFO', 'Starting Claude Code Telegram controller with Live Progress Monitoring...', {
+log('INFO', 'Starting Claude Code Telegram controller with Token Optimization...', {
   nodeVersion: process.version,
   pid: process.pid,
   projectCwd: PROJECT_CWD,
@@ -314,13 +314,14 @@ function formatToolActivity(item) {
   return `🔧 Tool: <code>${name}</code>`;
 }
 
-// --- Session & Multi-Directory Store Management ---
+// --- Session, Multi-Directory & Model Store Management ---
 function loadSessions() {
   if (fs.existsSync(SESSIONS_FILE)) {
     try {
       const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
       if (data && Array.isArray(data.list) && data.activeId) {
         if (!data.permissionMode) data.permissionMode = 'acceptEdits';
+        if (!data.selectedModel) data.selectedModel = 'sonnet';
         if (!Array.isArray(data.extraDirs)) data.extraDirs = [];
         if (data.primaryCwd) PROJECT_CWD = data.primaryCwd;
         return data;
@@ -334,6 +335,7 @@ function loadSessions() {
   const initialData = {
     activeId: defaultId,
     permissionMode: 'acceptEdits',
+    selectedModel: 'sonnet', // 'sonnet' or 'haiku'
     primaryCwd: PROJECT_CWD,
     extraDirs: process.env.EXTRA_DIRS ? process.env.EXTRA_DIRS.split(',').map(s => s.trim()).filter(Boolean) : [],
     list: [{
@@ -414,6 +416,42 @@ function renderModeMenu(chatId, messageId = null) {
     buttons.push([{
       text: `${isSelected ? '✓ ' : ''}${m.label}`,
       callback_data: `set_mode_${m.key}`
+    }]);
+  });
+
+  const options = {
+    parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: buttons }
+  };
+
+  if (messageId) {
+    bot.editMessageText(text, { chat_id: chatId, message_id: messageId, ...options }).catch(() => {});
+  } else {
+    sendSafeMessage(chatId, text, options);
+  }
+}
+
+// --- Strategy 3: Render AI Model Switcher Menu ---
+function renderModelMenu(chatId, messageId = null) {
+  const data = loadSessions();
+  const currentModel = data.selectedModel || 'sonnet';
+
+  const models = [
+    { key: 'sonnet', label: '🧠 Claude Sonnet', desc: 'Deep coding, multi-file architecture & reasoning (Default)' },
+    { key: 'haiku', label: '⚡ Claude Haiku', desc: 'Fast, lightweight & ~75% cheaper token cost' }
+  ];
+
+  let text = '🤖 *Select AI Model*\n\n';
+  text += 'Switch models anytime to optimize speed and token costs:\n\n';
+
+  const buttons = [];
+  models.forEach((m) => {
+    const isSelected = currentModel === m.key;
+    text += `${isSelected ? '🟢' : '⚪'} *${m.label}* ${isSelected ? '_(Active)_' : ''}\n   └ ${m.desc}\n\n`;
+
+    buttons.push([{
+      text: `${isSelected ? '✓ ' : ''}${m.label}`,
+      callback_data: `set_model_${m.key}`
     }]);
   });
 
@@ -531,6 +569,18 @@ bot.on('callback_query', (query) => {
 
   const data = loadSessions();
 
+  // Model change handler
+  if (action.startsWith('set_model_')) {
+    const newModel = action.replace('set_model_', '');
+    data.selectedModel = newModel;
+    saveSessions(data);
+
+    log('INFO', `Changed AI model to ${newModel}`);
+    bot.answerCallbackQuery(query.id, { text: `Model set to ${newModel}` });
+    renderModelMenu(chatId, messageId);
+    return;
+  }
+
   // Mode change handler
   if (action.startsWith('set_mode_')) {
     const newMode = action.replace('set_mode_', '');
@@ -637,7 +687,10 @@ bot.on('message', async (msg) => {
   if (text === '/start' || text === '/help') {
     const helpMsg = 
       '🤖 *Claude Code cPanel Controller*\n\n' +
-      '• *Send any text:* Prompt Claude Code with real-time live activity monitoring.\n' +
+      '• *Send any text:* Prompt Claude Code on active session.\n' +
+      '• `/ask <question>`: Quick one-off query without session history (saves tokens!).\n' +
+      '• `/compact`: Compress active session history (cuts token size by 70–85%).\n' +
+      '• `/model`: Switch AI model (🧠 Sonnet vs ⚡ Haiku ~75% cheaper).\n' +
       '• `/dirs`: View all accessible folders (simultaneous multi-folder access).\n' +
       '• `/adddir <path>`: Grant Claude access to an additional folder.\n' +
       '• `/rmdir <path>`: Revoke access to an additional folder.\n' +
@@ -652,6 +705,11 @@ bot.on('message', async (msg) => {
       '• `/stop`: Gracefully stop the controller daemon.\n' +
       '• `/help`: Display this guide.';
     return sendSafeMessage(chatId, helpMsg, { parse_mode: 'Markdown' });
+  }
+
+  // Strategy 3: Model Switcher
+  if (text === '/model' || text === '/models') {
+    return renderModelMenu(chatId);
   }
 
   // View all accessible folders
@@ -847,57 +905,84 @@ bot.on('message', async (msg) => {
   }
 
   // =========================================================================
-  // --- Process Claude Code Instruction with Real-Time Live Monitoring ---
+  // --- Execution Dispatcher: Regular Session, Compact, or One-Off (/ask) ---
   // =========================================================================
 
   const data = loadSessions();
   const currentSession = getActiveSession(data);
   const currentMode = data.permissionMode || 'acceptEdits';
+  const selectedModel = data.selectedModel || 'sonnet';
   const extraDirs = (data.extraDirs || []).filter(d => fs.existsSync(d));
 
-  // Auto-name session from first prompt if newly created
-  if (currentSession.isNew) {
+  // Determine if this is:
+  // 1. /compact (Strategy 1: Compacting history)
+  // 2. /ask (Strategy 2: One-off query without session history)
+  // 3. Regular ongoing session prompt
+  const isCompact = (text === '/compact');
+  const isOneOff = text.startsWith('/ask');
+
+  let promptToSend = text;
+  let targetSessionId = currentSession.id;
+  let initialFlag = currentSession.initialized ? '--resume' : '--session-id';
+  let sessionLabel = currentSession.title;
+
+  if (isCompact) {
+    promptToSend = '/compact';
+    sessionLabel = `Compacting ${currentSession.title}`;
+    // Compaction must resume the existing session
+    initialFlag = '--resume';
+  } else if (isOneOff) {
+    const question = text.replace('/ask', '').trim();
+    if (!question) {
+      return sendSafeMessage(chatId, '⚠️ Please provide a question. Example:\n`/ask What regex matches an email in PHP?`', { parse_mode: 'Markdown' });
+    }
+    promptToSend = question;
+    // Fresh temporary UUID that is not tied to session history
+    targetSessionId = crypto.randomUUID();
+    initialFlag = '--session-id';
+    sessionLabel = 'One-Off Query (No History)';
+  } else if (currentSession.isNew) {
     currentSession.title = text.slice(0, 30) + (text.length > 30 ? '...' : '');
     delete currentSession.isNew;
     saveSessions(data);
+    sessionLabel = currentSession.title;
   }
 
   const folderCount = extraDirs.length + 1;
   const startTime = Date.now();
 
-  // Send initial Live Status Card message in Telegram
+  // Initial Status Card in Telegram
   const initialStatusText = 
-    `⏳ <b>Claude is working...</b> [${currentMode}]\n` +
-    `Session: <code>${currentSession.title}</code> (${folderCount} folder${folderCount > 1 ? 's' : ''})\n\n` +
+    `⏳ <b>Claude is working...</b> [${currentMode}] (${selectedModel})\n` +
+    `Session: <code>${sessionLabel}</code>\n\n` +
     `🛠️ <b>Live Activity:</b>\n` +
     `▶️ 🚀 Initializing session & tools...`;
 
   const statusMsg = await bot.sendMessage(chatId, initialStatusText, { parse_mode: 'HTML' });
   const statusMsgId = statusMsg.message_id;
 
-  // Typing indicator interval (Telegram typing action lasts 5 seconds)
+  // Typing indicator
   const typingInterval = setInterval(() => {
     bot.sendChatAction(chatId, 'typing').catch(() => {});
   }, 4000);
   bot.sendChatAction(chatId, 'typing').catch(() => {});
 
-  log('INFO', `Executing Claude Code command in session: ${currentSession.title} (${currentSession.id})`, {
+  log('INFO', `Executing Claude Code: ${sessionLabel}`, {
+    isCompact,
+    isOneOff,
+    model: selectedModel,
     permissionMode: currentMode,
-    primaryCwd: PROJECT_CWD,
-    extraDirs,
-    initialized: !!currentSession.initialized,
-    prompt: text
+    sessionId: targetSessionId,
+    prompt: promptToSend.slice(0, 100)
   });
 
-  // Track activity stream
   const activities = [];
   let lastStatusUpdate = 0;
   let pendingUpdateTimer = null;
 
-  // Throttled function to update Telegram live status card
   function updateLiveStatusCard(finished = false, durationSec = null) {
     const now = Date.now();
-    const MIN_INTERVAL = 1400; // Throttle to stay within Telegram rate limits
+    const MIN_INTERVAL = 1400;
 
     const render = async () => {
       lastStatusUpdate = Date.now();
@@ -905,16 +990,16 @@ bot.on('message', async (msg) => {
 
       if (finished) {
         cardText = 
-          `✅ <b>Task Completed!</b> (${durationSec}s)\n` +
-          `Session: <code>${currentSession.title}</code>\n\n`;
+          `✅ <b>${isCompact ? 'Compaction' : 'Task'} Completed!</b> (${durationSec}s)\n` +
+          `Session: <code>${sessionLabel}</code> (${selectedModel})\n\n`;
         if (activities.length > 0) {
           cardText += `🛠️ <b>Actions performed:</b>\n` +
             activities.slice(-5).map(a => `• ${a}`).join('\n');
         }
       } else {
         cardText = 
-          `⏳ <b>Claude is working...</b> [${currentMode}]\n` +
-          `Session: <code>${currentSession.title}</code>\n\n`;
+          `⏳ <b>Claude is working...</b> [${currentMode}] (${selectedModel})\n` +
+          `Session: <code>${sessionLabel}</code>\n\n`;
         if (activities.length > 0) {
           const recent = activities.slice(-4);
           cardText += `🛠️ <b>Live Activity:</b>\n` +
@@ -930,9 +1015,7 @@ bot.on('message', async (msg) => {
           message_id: statusMsgId,
           parse_mode: 'HTML'
         });
-      } catch (e) {
-        // Ignore Telegram messageNotModified errors
-      }
+      } catch (e) {}
     };
 
     if (finished) {
@@ -953,12 +1036,14 @@ bot.on('message', async (msg) => {
 
   // --- Real-Time Execution Handler using spawn + stream-json ---
   function executeWithLiveStream(flag, sessionId, retryCount = 0) {
-    // Build CLI arguments
+    // Build CLI arguments with Strategy 1 (--autocompact auto) and Strategy 3 (--model)
     const args = [
       flag, sessionId,
+      '--model', selectedModel,
+      '--autocompact', 'auto',
       '--output-format', 'stream-json',
       '--verbose',
-      '-p', text
+      '-p', promptToSend
     ];
 
     if (currentMode === 'bypass') {
@@ -976,13 +1061,12 @@ bot.on('message', async (msg) => {
     const claudeProc = spawn(claudeBin, args, {
       cwd: PROJECT_CWD,
       env: process.env,
-      stdio: ['ignore', 'pipe', 'pipe'] // Closes stdin immediately (< /dev/null equivalent)
+      stdio: ['ignore', 'pipe', 'pipe']
     });
 
     let rawStdout = '';
     let rawStderr = '';
     let finalResult = null;
-
     let stdoutBuffer = '';
 
     claudeProc.stdout.on('data', (chunk) => {
@@ -990,7 +1074,6 @@ bot.on('message', async (msg) => {
       rawStdout += chunk.toString();
 
       const lines = stdoutBuffer.split('\n');
-      // Keep unfinished line in buffer
       stdoutBuffer = lines.pop();
 
       for (const line of lines) {
@@ -998,7 +1081,7 @@ bot.on('message', async (msg) => {
         try {
           const event = JSON.parse(line);
 
-          // Detect tool executions (Read, Edit, Write, Bash, etc.)
+          // Detect tool executions
           if (event.type === 'assistant' && event.message?.content) {
             for (const item of event.message.content) {
               if (item.type === 'tool_use') {
@@ -1016,9 +1099,7 @@ bot.on('message', async (msg) => {
           if (event.type === 'result') {
             finalResult = event.result;
           }
-        } catch (e) {
-          // Not a JSON line, ignore
-        }
+        } catch (e) {}
       }
     });
 
@@ -1051,7 +1132,7 @@ bot.on('message', async (msg) => {
       }
 
       // Case 2: Session ID already in use -> Auto-recover with --resume
-      if (exitCode !== 0 && combined.includes('already in use') && retryCount === 0) {
+      if (!isOneOff && exitCode !== 0 && combined.includes('already in use') && retryCount === 0) {
         log('WARN', `Session ${sessionId} already in use, auto-recovering with --resume...`);
         currentSession.initialized = true;
         saveSessions(data);
@@ -1059,7 +1140,7 @@ bot.on('message', async (msg) => {
       }
 
       // Case 3: No conversation found -> Auto-recover with fresh ID
-      if (exitCode !== 0 && combined.includes('No conversation found') && retryCount === 0) {
+      if (!isOneOff && exitCode !== 0 && combined.includes('No conversation found') && retryCount === 0) {
         const freshId = crypto.randomUUID();
         log('WARN', `Session ${sessionId} not found on disk, recovering with fresh ID: ${freshId}...`);
         currentSession.id = freshId;
@@ -1068,7 +1149,7 @@ bot.on('message', async (msg) => {
         return executeWithLiveStream('--session-id', freshId, retryCount + 1);
       }
 
-      // Update Live Status Card to Completed
+      // Update Live Status Card
       await updateLiveStatusCard(true, elapsedSec);
 
       // Determine final output
@@ -1077,18 +1158,19 @@ bot.on('message', async (msg) => {
       if (exitCode !== 0) {
         log('ERROR', `Claude Code failed after ${elapsed}ms`, { exitCode, stderr: rawStderr.trim() });
       } else {
-        currentSession.initialized = true;
-        saveSessions(data);
+        if (!isOneOff) {
+          currentSession.initialized = true;
+          saveSessions(data);
+        }
         log('INFO', `Claude Code succeeded in ${elapsed}ms`, { outputLength: resultText.length });
       }
 
-      // Send the full formatted result as separate markdown message(s)
+      // Send formatted output
       await sendFormattedOutput(chatId, resultText);
     });
   }
 
-  const initialFlag = currentSession.initialized ? '--resume' : '--session-id';
-  executeWithLiveStream(initialFlag, currentSession.id);
+  executeWithLiveStream(initialFlag, targetSessionId);
 });
 
 log('INFO', 'Claude Code Telegram controller is now listening.');

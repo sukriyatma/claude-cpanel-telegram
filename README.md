@@ -2,6 +2,7 @@
 
 A lightweight bridge that enables you to run and control **Claude Code** on a cPanel web server (without SSH access) remotely from your phone using Telegram, featuring:
 - **Real-Time Live Progress Monitoring:** Watch Claude work in real time! The bot displays and updates an in-chat status card showing every file read, search, edit, and bash command as it happens.
+- **Token Cost Optimization Built-in:** Includes `/compact`, `/ask` one-offs, `/model` toggle (Sonnet vs Haiku), and automatic background `--autocompact auto`.
 - **Simultaneous Multi-Folder Access (`/adddir`, `/dirs`):** Give Claude access to multiple project directories at the same time using `--add-dir`.
 - **Interactive Permission Control (`/mode`):** Switch between Auto-Accept Edits, Full Autonomous, and Safe Plan modes with one tap.
 - **Interactive OAuth `/login` from Telegram:** Sign in to your Claude Pro/Team account via link.
@@ -40,7 +41,26 @@ Session: Main Site
 
 ---
 
-## Starting and Stopping the Service
+## Token Optimization & Cost Reduction
+
+Resuming sessions (`--resume <uuid>`) in Claude Code re-sends the entire past conversation transcript (including large files read during previous turns) on every new message. This bot implements 3 built-in strategies to minimize token costs:
+
+### 1. Session Compaction (`/compact` & Auto-Compact)
+- Type `/compact` at any point to force Claude to summarize the conversation and purge heavy raw file contents while preserving context.
+- Reduces token footprint on subsequent turns by **70%–85%**.
+- The bot also runs with `--autocompact auto` by default to prevent explosive token growth in long sessions.
+
+### 2. Isolated One-Off Queries (`/ask <question>`)
+- Use `/ask <question>` (e.g., `/ask how does the JWT helper work?` or `/ask check disk space`).
+- Executes your prompt in a **fresh, isolated session** with zero prior history.
+- Saves **100%** of accumulated session context tokens. Does not pollute your active session.
+
+### 3. AI Model Switcher (`/model`)
+- Use `/model` to interactively switch between models:
+  - 🧠 **Claude Sonnet** *(Default)*: For complex architecture, deep multi-file debugging, and extensive coding.
+  - ⚡ **Claude Haiku**: For quick explanations, terminal lookups, and simple edits — **~75% cheaper** token cost and significantly faster response times.
+
+---
 
 ### Starting
 ```bash
@@ -94,7 +114,10 @@ In headless mode, you can control approvals directly from Telegram:
 
 | Command | Action |
 |---|---|
-| *Any text* | Prompts Claude Code with real-time live activity tracking |
+| *Any text* | Prompts Claude Code on the active session with live activity tracking |
+| `/ask <question>` | Quick one-off query without session history (saves 100% of session resume tokens) |
+| `/compact` | Compresses active session history (cuts token size by 70–85%) |
+| `/model` | Interactive menu to toggle AI model (🧠 Sonnet vs ⚡ Haiku ~75% cheaper) |
 | `/dirs` | Displays all configured directories (primary + additional) |
 | `/adddir <path>` | Adds an additional folder for simultaneous access |
 | `/rmdir <path>` | Removes an additional folder |
